@@ -263,11 +263,13 @@ class SheetDirectoryDialog(QDialog):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
         )
         if reply == QMessageBox.StandardButton.Yes:
+            # 先结束编辑会话，防止 _save_current_row 重建表格触发 cellChanged 递归弹窗
+            self._reset_edit_state()
             self._save_current_row(row)
         else:
             self._revert_cell(row, col)
+            self._reset_edit_state()
 
-        self._reset_edit_state()
         self._reapply_pending_filter()
 
     def _save_current_row(self, row: int):

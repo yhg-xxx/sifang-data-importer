@@ -11,6 +11,10 @@ TABLE_NAMES = [f"enterprise_info_{i:03d}" for i in range(1, 47)]
 
 BATCH_SIZE = 5000
 
+# 数据库中 NOT NULL 的字段：空值（None / 空串 / 纯空白）必须在导入前拦截，
+# 否则会被 _row_to_dict 转成空串 ''，而 SQL Server 的 NOT NULL 只拒绝 NULL、不拒绝 ''。
+NOT_NULL_COLUMNS = ("company_name", "industry")
+
 # 缓存 column_mapping，避免每行数据都打开/关闭 SQLite 连接
 _COLUMN_MAPPING_CACHE = None
 
@@ -73,31 +77,50 @@ def _diagnose_batch(
     return errors
 
 
+def _format_row_ranges(row_nums: list[int]) -> str:
+    """将升序行号列表合并为连续区间文本，如 '第 106450-106480 行'。
+
+    单行显示为 '第 5 行'；多段区间用逗号连接，
+    如 '第 5-8 行, 第 20-25 行, 第 30 行'。
+    """
+    if not row_nums:
+        return ""
+    parts = []
+    start = prev = row_nums[0]
+    for rn in row_nums[1:]:
+        if rn == prev + 1:
+            prev = rn
+            continue
+        parts.append(f"{start}-{prev}" if start != prev else f"{start}")
+        start = prev = rn
+    parts.append(f"{start}-{prev}" if start != prev else f"{start}")
+    return ", ".join(f"第 {p} 行" for p in parts)
+
+
 def _format_sheet_errors(
     sheet_name: str,
     table_name: str,
     errors: list[tuple[int, dict, str]],
+    total_rows: int = 0,
 ) -> str:
     """将整个 sheet 的错误行按数据库报错信息分组，格式化输出。
 
-    每组展示：错误类型 + 全部出错行号 + 前 3 条样例的列值明细，
-    保证所有错误一次看全且同类错误不重复刷屏。
+    每组展示：错误类型 + 出错行号区间 + 前 3 条样例的列值明细。
+    连续行号合并为区间（如 106450-106480），避免逐行刷屏；
+    total_rows 为整个 sheet 已扫描的总行数，用于确认已全量扫描。
     """
     groups = {}
     for excel_row, row_dict, err in errors:
         groups.setdefault(err, []).append((excel_row, row_dict))
 
+    scanned = f"，已扫描整个 Sheet 共 {total_rows} 行" if total_rows else ""
     parts = [
         f"导入失败，表 [{table_name}] / Sheet [{sheet_name}] "
-        f"共 {len(errors)} 行数据存在错误:"
+        f"共 {len(errors)} 行数据存在错误{scanned}:"
     ]
     for err, items in groups.items():
         parts.append(f"\n■ 错误类型（{len(items)} 行）: {err}")
-        row_lines = []
-        for i in range(0, len(items), 15):
-            chunk = items[i:i + 15]
-            row_lines.append("  第 " + ", ".join(str(rn) for rn, _ in chunk) + " 行")
-        parts.append("\n".join(row_lines))
+        parts.append(f"  出错行: {_format_row_ranges([rn for rn, _ in items])}")
 
         sample_count = min(3, len(items))
         parts.append(f"  样例（前 {sample_count} 条）:")
@@ -135,12 +158,39 @@ def _import_sheet(
         batch_index += 1
         row_nums = [rn for rn, _ in batch]
         rows_as_dicts = [_row_to_dict(row_data) for _, row_data in batch]
+        sheet_rows += len(batch)
+
+        # ── NOT NULL 前置检查 ──
+        # 空 company_name / industry 若放行，会被 _row_to_dict 转成空串 '' 写入数据库，
+        # 而 SQL Server 的 NOT NULL 不拦截空串，因此这里显式拦截并记录错误。
+        clean_rows = []
+        clean_row_nums = []
+        for excel_row, row_dict in zip(row_nums, rows_as_dicts):
+            null_cols = [
+                col for col in NOT_NULL_COLUMNS
+                if row_dict.get(col) is None
+                or (
+                    isinstance(row_dict.get(col), str)
+                    and row_dict.get(col).strip() == ""
+                )
+            ]
+            if null_cols:
+                all_errors.append((
+                    excel_row, row_dict,
+                    f"字段 [{', '.join(null_cols)}] 不能为空 (NOT NULL 约束)",
+                ))
+            else:
+                clean_rows.append(row_dict)
+                clean_row_nums.append(excel_row)
+
+        if not clean_rows:
+            continue  # 本批没有可插入的有效行
 
         # 每批使用独立 cursor，避免批量失败后 cursor 状态损坏影响后续批次
         batch_cursor = conn.cursor()
         batch_cursor.fast_executemany = True
         try:
-            database.insert_batch(batch_cursor, table_name, rows_as_dicts, schema)
+            database.insert_batch(batch_cursor, table_name, clean_rows, schema)
         except Exception as e:
             if progress_callback:
                 progress_callback(
@@ -149,7 +199,7 @@ def _import_sheet(
                     "正在逐行定位错误行...",
                 )
             batch_errors = _diagnose_batch(
-                conn, table_name, rows_as_dicts, row_nums, schema,
+                conn, table_name, clean_rows, clean_row_nums, schema,
             )
             if batch_errors:
                 all_errors.extend(batch_errors)
@@ -158,10 +208,11 @@ def _import_sheet(
                 bulk_error_msgs.append(str(e))
         finally:
             batch_cursor.close()
-        sheet_rows += len(batch)
 
     if all_errors:
-        raise ValueError(_format_sheet_errors(sheet_name, table_name, all_errors))
+        raise ValueError(
+            _format_sheet_errors(sheet_name, table_name, all_errors, sheet_rows)
+        )
     if bulk_error_msgs:
         raise ValueError(
             "批量插入失败，但逐行诊断未发现异常数据，原始数据库报错：\n"

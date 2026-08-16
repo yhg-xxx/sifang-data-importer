@@ -9,6 +9,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QPushButton,
     QLabel,
+    QApplication,
     QCheckBox,
     QTableWidget,
     QTableWidgetItem,
@@ -61,6 +62,7 @@ class MainWindow(QMainWindow):
         self._load_start_time = 0.0
         self._loading_file_name = ""
         self._updating_header = False  # 防止表头 checkbox 更新递归
+        self._anchor_row = -1  # Shift 范围勾选的锚点行
 
         self.setWindowTitle("四方数据导入工具")
         self.setMinimumSize(900, 620)
@@ -117,7 +119,7 @@ class MainWindow(QMainWindow):
         self._sheet_table.setHorizontalHeaderLabels([
             "", "序号", "Sheet名称", "最后导入时间",
         ])
-        self._sheet_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self._sheet_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._sheet_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._sheet_table.setAlternatingRowColors(True)
         self._sheet_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
@@ -248,6 +250,7 @@ class MainWindow(QMainWindow):
         mappings = local_db.get_sheet_names()
         time_map = {m["sheet_name"]: m["last_import_time"] for m in mappings}
 
+        self._anchor_row = -1  # 表格重建后重置 Shift 锚点
         self._sheet_table.setRowCount(len(self._sheets))
         for i, sheet in enumerate(self._sheets):
             name = sheet["sheet_name"]
@@ -255,7 +258,9 @@ class MainWindow(QMainWindow):
             # 勾选框（列0）— QCheckBox 包裹在居中容器中
             cb = QCheckBox()
             cb.setChecked(True)
+            cb.setProperty("row", i)
             cb.stateChanged.connect(self._on_row_check_changed)
+            cb.clicked.connect(self._on_row_check_clicked)
             wrapper = QWidget()
             wrapper_layout = QHBoxLayout(wrapper)
             wrapper_layout.setContentsMargins(0, 0, 0, 0)
@@ -319,11 +324,44 @@ class MainWindow(QMainWindow):
         """任一行 checkbox 状态变化时，刷新表头 checkbox。"""
         self._update_header_check_state()
 
+    def _on_row_check_clicked(self, checked: bool):
+        """用户点击行首勾选框时触发。
+
+        按住 Shift 点击时，将「上次点击的锚点行 → 当前行」整段设为同一勾选状态。
+        """
+        cb = self.sender()
+        if cb is None:
+            return
+        row_prop = cb.property("row")
+        if row_prop is None:
+            return
+        row = int(row_prop)
+        if row < 0:
+            return
+
+        shift_held = QApplication.keyboardModifiers() & Qt.KeyboardModifier.ShiftModifier
+        if shift_held and self._anchor_row != -1 and row != self._anchor_row:
+            self._set_range_checked(self._anchor_row, row, checked)
+
+        self._anchor_row = row
+
+    def _set_range_checked(self, start: int, end: int, checked: bool):
+        """将 start..end 行的勾选状态统一设为 checked（Shift 范围勾选）。"""
+        lo, hi = min(start, end), max(start, end)
+        self._updating_header = True
+        for row in range(lo, hi + 1):
+            cb = self._get_checkbox(row)
+            if cb and cb.isChecked() != checked:
+                cb.setChecked(checked)
+        self._updating_header = False
+        self._update_header_check_state()
+
     def _on_header_checkbox_clicked(self):
         """全选 checkbox 被点击时，同步所有行 checkbox。"""
         if self._updating_header:
             return
 
+        self._anchor_row = -1  # 全选操作后重置 Shift 锚点
         all_checked = self._header_cb.isChecked()
         self._updating_header = True
         for row in range(self._sheet_table.rowCount()):
@@ -367,7 +405,9 @@ class MainWindow(QMainWindow):
             "  读取完成后，表格中显示每个 Sheet 的序号、名称及最后导入时间。\n\n"
             "三、勾选要处理的 Sheet\n"
             "  默认全选，可通过行首复选框独立勾选/取消。\n"
-            "  点击「全选」可一键全选或取消全选。\n\n"
+            "  点击「全选」可一键全选或取消全选。\n"
+            "  批量勾选连续区间：先勾选起始行，再按住 Shift 点击结束行，\n"
+            "  中间所有行会一并勾选（反向操作同理可批量取消）。\n\n"
             "四、验证数据（可选）\n"
             "  点击「验证数据」→ 确认映射 → 对 Excel 数据进行离线校验：\n"
             "  检查 NOT NULL 约束、字段长度限制、日期格式等，\n"
