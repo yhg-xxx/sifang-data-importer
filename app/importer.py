@@ -1,10 +1,22 @@
 """导入编排器 - 协调 Excel 流式读取与数据库批量写入"""
 
 from datetime import datetime
-import openpyxl
-from openpyxl.utils import get_column_letter
+
+from python_calamine import CalamineWorkbook
 
 from app import database, date_utils, excel_reader, logger, local_db
+
+
+def _col_letter(idx: int) -> str:
+    """Excel 列索引(1-based) → 列字母：1→A, 27→AA。
+
+    替代已移除的 openpyxl.utils.get_column_letter。
+    """
+    letters = ""
+    while idx > 0:
+        idx, rem = divmod(idx - 1, 26)
+        letters = chr(65 + rem) + letters
+    return letters
 
 # 46 张目标表名
 TABLE_NAMES = [f"enterprise_info_{i:03d}" for i in range(1, 47)]
@@ -126,7 +138,7 @@ def _format_sheet_errors(
         parts.append(f"  样例（前 {sample_count} 条）:")
         for excel_row, row_dict in items[:sample_count]:
             col_details = [
-                f"    {get_column_letter(idx + 1)}列 ({db_col}) = {repr(row_dict.get(db_col))}"
+                f"    {_col_letter(idx + 1)}列 ({db_col}) = {repr(row_dict.get(db_col))}"
                 for db_col, idx in _get_column_mapping()
             ]
             parts.append(f"  Excel 第 {excel_row} 行:")
@@ -290,7 +302,7 @@ def run_import(
         # ── 2. 打开 Excel 一次，所有 sheet 共用 ──
         if progress_callback:
             progress_callback(0, actual_count, "正在读取 Excel 文件...")
-        wb = openpyxl.load_workbook(excel_path, read_only=True, data_only=True)
+        wb = CalamineWorkbook.from_path(excel_path)
 
         try:
             # ── 3. 逐表导入，每表一个事务 ──

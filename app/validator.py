@@ -1,10 +1,10 @@
 """数据验证模块 - 在导入前校验 Excel 数据是否符合数据库约束"""
 
 from datetime import datetime, date
-import openpyxl
-from openpyxl.utils import get_column_letter
 
-from app.importer import _row_to_dict
+from python_calamine import CalamineWorkbook
+
+from app.importer import _row_to_dict, _col_letter
 from app import date_utils, excel_reader, local_db
 
 # 字段约束定义（与 create_all_tables.sql 保持一致）
@@ -78,7 +78,7 @@ def _get_col_letter(db_col: str) -> str:
     if _col_letter_map_cache is None:
         mapping = local_db.get_column_mapping()
         _col_letter_map_cache = {
-            col_name: get_column_letter(excel_idx + 1)
+            col_name: _col_letter(excel_idx + 1)
             for col_name, excel_idx in mapping
         }
     return _col_letter_map_cache.get(db_col, "?")
@@ -136,7 +136,7 @@ def validate_excel(filepath: str, selected_sheets: list[dict],
     total_rows = 0
     errors_by_sheet = {}
 
-    wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
+    wb = CalamineWorkbook.from_path(filepath)
     try:
         for i, item in enumerate(selected_sheets):
             sheet_name = item["sheet_name"]

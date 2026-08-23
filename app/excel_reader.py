@@ -1,7 +1,9 @@
-"""Excel 文件读取 - 使用 openpyxl 和 zipfile"""
+"""Excel 文件读取 - 使用 python-calamine 和 zipfile"""
 
 import zipfile
 import xml.etree.ElementTree as ET
+
+from python_calamine import CalamineWorkbook
 
 
 def read_sheets(filepath: str) -> list[dict]:
@@ -29,7 +31,7 @@ def read_sheets(filepath: str) -> list[dict]:
 
 
 def iter_sheet_rows_from_workbook(
-    wb, sheet_name: str, batch_size: int = 5000,
+    wb: CalamineWorkbook, sheet_name: str, batch_size: int = 5000,
 ):
     """从已打开的 workbook 中流式读取单个 sheet（避免重复打开文件）。
 
@@ -37,13 +39,13 @@ def iter_sheet_rows_from_workbook(
         (start_row: int, list[tuple[int, list]]): start_row 为批次首行在 Excel 中的行号（1-based），
         每批为 (实际Excel行号, 行数据) 元组列表，最多 batch_size 个数据行。
     """
-    ws = wb[sheet_name]
+    ws = wb.get_sheet_by_name(sheet_name)
     yield from _iter_ws_rows(ws, batch_size)
 
 
 def _iter_ws_rows(ws, batch_size: int):
     """内部函数：从已打开的 worksheet 流式读取。"""
-    rows_iter = ws.iter_rows(values_only=True)
+    rows_iter = ws.iter_rows()
 
     # 跳过表头（第1行）
     try:
