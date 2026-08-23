@@ -12,7 +12,7 @@ a = Analysis(
     ],
     hiddenimports=[
         'PySide6',
-        'openpyxl',
+        'python_calamine',
         'pyodbc',
         'app',
         'app.config',

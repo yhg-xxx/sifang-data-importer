@@ -1,11 +1,12 @@
 """数据验证模块 - 在导入前校验 Excel 数据是否符合数据库约束"""
 
 from datetime import datetime, date
-import openpyxl
-from openpyxl.utils import get_column_letter
 
-from app.importer import _row_to_dict
+from python_calamine import CalamineWorkbook
+
+from app.importer import _row_to_dict, _format_row_ranges, _get_column_mapping
 from app import date_utils, excel_reader, local_db
+from app.utils import col_letter
 
 # 字段约束定义（与 create_all_tables.sql 保持一致）
 # (db_col_name, is_not_null, max_length, need_date_check)
@@ -23,8 +24,8 @@ FIELD_CONSTRAINTS = [
     ("system_reply",  False, None,  False),   # nvarchar(MAX) 无限制
 ]
 
-def _validate_row(row_dict: dict, sheet_name: str, excel_row: int):
-    """校验单行数据，返回错误列表。"""
+def _validate_row(row_dict: dict, excel_row: int):
+    """校验单行数据，返回 [(excel_row, row_dict, err_msg), ...] 元组列表。"""
     errors = []
 
     for db_col, is_not_null, max_length, need_date_check in FIELD_CONSTRAINTS:
@@ -33,12 +34,11 @@ def _validate_row(row_dict: dict, sheet_name: str, excel_row: int):
         # 1. NOT NULL 检查
         if is_not_null:
             if value is None or (isinstance(value, str) and value.strip() == ""):
-                col_letter = _get_col_letter(db_col)
-                errors.append(
-                    f"  Sheet [{sheet_name}] Excel 第 {excel_row} 行, "
-                    f"{col_letter}列 ({db_col}): 不能为空 (NOT NULL 约束)"
-                )
-                continue  # 已报错，跳过后续检查
+                errors.append((
+                    excel_row, row_dict,
+                    f"字段 [{db_col}] 不能为空 (NOT NULL 约束)",
+                ))
+                continue
 
         # 2. 如果值为 None，跳过长度和日期检查
         if value is None:
@@ -47,23 +47,18 @@ def _validate_row(row_dict: dict, sheet_name: str, excel_row: int):
         # 3. 长度检查（仅对字符串类型）
         if max_length is not None and isinstance(value, str):
             if len(value) > max_length:
-                col_letter = _get_col_letter(db_col)
-                errors.append(
-                    f"  Sheet [{sheet_name}] Excel 第 {excel_row} 行, "
-                    f"{col_letter}列 ({db_col}): "
-                    f"值长度 {len(value)} 超过限制 {max_length}，"
-                    f"当前值: {repr(value)[:100]}"
-                )
+                errors.append((
+                    excel_row, row_dict,
+                    f"字段 [{db_col}] 值长度 {len(value)} 超过限制 {max_length}",
+                ))
 
         # 4. 日期类型检查
         if need_date_check and value is not None:
             if not _is_valid_date(value):
-                col_letter = _get_col_letter(db_col)
-                errors.append(
-                    f"  Sheet [{sheet_name}] Excel 第 {excel_row} 行, "
-                    f"{col_letter}列 ({db_col}): "
-                    f"无法解析为日期，当前值: {repr(value)}"
-                )
+                errors.append((
+                    excel_row, row_dict,
+                    f"字段 [{db_col}] 无法解析为日期",
+                ))
 
     return errors
 
@@ -78,7 +73,7 @@ def _get_col_letter(db_col: str) -> str:
     if _col_letter_map_cache is None:
         mapping = local_db.get_column_mapping()
         _col_letter_map_cache = {
-            col_name: get_column_letter(excel_idx + 1)
+            col_name: col_letter(excel_idx + 1)
             for col_name, excel_idx in mapping
         }
     return _col_letter_map_cache.get(db_col, "?")
@@ -97,6 +92,37 @@ def _is_valid_date(value) -> bool:
     return True  # 其他类型（如 int/float）不校验
 
 
+def _format_validation_errors(
+    sheet_name: str,
+    errors: list[tuple[int, dict, str]],
+    total_rows: int = 0,
+) -> str:
+    """将验证错误按类型分组，格式化输出（与导入报错格式一致）。"""
+    groups = {}
+    for excel_row, row_dict, err in errors:
+        groups.setdefault(err, []).append((excel_row, row_dict))
+
+    scanned = f"，已扫描整个 Sheet 共 {total_rows} 行" if total_rows else ""
+    parts = [
+        f"验证完成，Sheet [{sheet_name}] "
+        f"共 {len(errors)} 行数据存在错误{scanned}:"
+    ]
+    for err, items in groups.items():
+        parts.append(f"\n■ 错误类型（{len(items)} 行）: {err}")
+        parts.append(f"  出错行: {_format_row_ranges([rn for rn, _ in items])}")
+
+        sample_count = min(3, len(items))
+        parts.append(f"  样例（前 {sample_count} 条）:")
+        for excel_row, row_dict in items[:sample_count]:
+            col_details = [
+                f"    {col_letter(idx + 1)}列 ({db_col}) = {repr(row_dict.get(db_col))}"
+                for db_col, idx in _get_column_mapping()
+            ]
+            parts.append(f"  Excel 第 {excel_row} 行:")
+            parts.extend(col_details)
+    return "\n".join(parts)
+
+
 def validate_excel(filepath: str, selected_sheets: list[dict],
                    progress_callback=None) -> dict:
     """验证 Excel 文件中指定 sheet 的数据。
@@ -113,11 +139,11 @@ def validate_excel(filepath: str, selected_sheets: list[dict],
             "total_rows": int,      # 总行数
             "total_sheets": int,    # 总 sheet 数
             "errors_by_sheet": {    # 按 sheet 分组的错误
-                "sheet_name": [
-                    "错误描述1",
-                    "错误描述2",
-                    ...
-                ],
+                "sheet_name": {
+                    "raw_errors": [(excel_row, row_dict, err_msg), ...],
+                    "total_rows": int,
+                    "formatted": str,
+                },
             },
             "error": str,           # 错误信息
         }
@@ -136,7 +162,7 @@ def validate_excel(filepath: str, selected_sheets: list[dict],
     total_rows = 0
     errors_by_sheet = {}
 
-    wb = openpyxl.load_workbook(filepath, read_only=True, data_only=True)
+    wb = CalamineWorkbook.from_path(filepath)
     try:
         for i, item in enumerate(selected_sheets):
             sheet_name = item["sheet_name"]
@@ -145,19 +171,27 @@ def validate_excel(filepath: str, selected_sheets: list[dict],
                 progress_callback(i, len(selected_sheets), sheet_name)
 
             sheet_errors = []
+            sheet_row_count = 0
 
             for batch_start_row, batch in excel_reader.iter_sheet_rows_from_workbook(
                 wb, sheet_name, batch_size=5000
             ):
                 for row_num, row in batch:
                     total_rows += 1
+                    sheet_row_count += 1
                     row_dict = _row_to_dict(row)
-                    row_errors = _validate_row(row_dict, sheet_name, row_num)
+                    row_errors = _validate_row(row_dict, row_num)
                     sheet_errors.extend(row_errors)
                     total_errors += len(row_errors)
 
             if sheet_errors:
-                errors_by_sheet[sheet_name] = sheet_errors
+                errors_by_sheet[sheet_name] = {
+                    "raw_errors": sheet_errors,
+                    "total_rows": sheet_row_count,
+                    "formatted": _format_validation_errors(
+                        sheet_name, sheet_errors, sheet_row_count,
+                    ),
+                }
     finally:
         wb.close()
 

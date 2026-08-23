@@ -1,4 +1,4 @@
-"""Sheet名-表映射对话框 — 展示、新增、编辑、删除、筛选 local_db 中 sheet→表名映射"""
+"""Sheet名-表映射对话框 — 展示、新增、编辑、删除、筛选、查找替换 local_db 中 sheet→表名映射"""
 
 from PySide6.QtWidgets import (
     QDialog,
@@ -12,6 +12,8 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QMenu,
     QMessageBox,
+    QStatusBar,
+    QSizePolicy,
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
@@ -27,7 +29,8 @@ class SheetDirectoryDialog(QDialog):
 
     支持：
     - 搜索框实时筛选（按 Sheet 名称模糊匹配）
-    - 双击单元格进入编辑（列 0~2），回车后弹窗确认保存
+    - 替换输入框 + 「替换全部」按钮：在筛选结果内批量替换 Sheet名称 和 数据库表名
+    - 双击单元格进入编辑（列 0~2），回车后直接保存并显示状态栏提示
     - 右键行 → 删除，弹窗确认
     - 右上角「新增」按钮，新增空行
     - 「最后导入时间」列（列 3）不可编辑
@@ -61,8 +64,8 @@ class SheetDirectoryDialog(QDialog):
         self._filter_input = QLineEdit()
         self._filter_input.setPlaceholderText("筛选Sheet名称...")
         self._filter_input.setClearButtonEnabled(True)
-        self._filter_input.setMinimumWidth(180)
-        self._filter_input.setMaximumWidth(260)
+        self._filter_input.setFixedWidth(220)
+        self._filter_input.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
         self._filter_input.textChanged.connect(self._on_filter_text_changed)
         self._filter_input.returnPressed.connect(self._apply_filter_immediately)
         top_layout.addWidget(self._filter_input)
@@ -71,6 +74,20 @@ class SheetDirectoryDialog(QDialog):
         reset_btn.setMinimumWidth(60)
         reset_btn.clicked.connect(self._reset_filter)
         top_layout.addWidget(reset_btn)
+
+        top_layout.addSpacing(16)
+
+        self._replace_input = QLineEdit()
+        self._replace_input.setPlaceholderText("替换为...")
+        self._replace_input.setClearButtonEnabled(True)
+        self._replace_input.setFixedWidth(160)
+        self._replace_input.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+        top_layout.addWidget(self._replace_input)
+
+        self._replace_all_btn = QPushButton("替换全部")
+        self._replace_all_btn.setMinimumWidth(90)
+        self._replace_all_btn.clicked.connect(self._replace_all)
+        top_layout.addWidget(self._replace_all_btn)
 
         top_layout.addStretch()
 
@@ -117,6 +134,11 @@ class SheetDirectoryDialog(QDialog):
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
 
+        # ── 状态栏（原生 Qt 提示） ──
+        self._status_bar = QStatusBar()
+        self._status_bar.setMaximumHeight(24)
+        layout.addWidget(self._status_bar)
+
     # ── 数据加载 ──
 
     def _load_all_data(self):
@@ -139,13 +161,7 @@ class SheetDirectoryDialog(QDialog):
         for row, r in enumerate(filtered):
             self._fill_row(row, r)
 
-        # 计数标签
-        total = len(self._all_records)
-        shown = len(filtered)
-        if keyword:
-            self._count_label.setText(f"共 {total} 条（筛选 {shown} 条）")
-        else:
-            self._count_label.setText(f"共 {total} 条记录")
+        self._count_label.setText(f"共 {len(filtered)} 条")
 
     def _fill_row(self, row: int, r: dict):
         """将一条记录填充到指定行。"""
@@ -232,7 +248,7 @@ class SheetDirectoryDialog(QDialog):
     # ── 编辑完成（回车 / 失去焦点）──
 
     def _on_cell_changed(self, row: int, col: int):
-        """单元格内容变更后触发：弹窗确认 → 保存或回退。"""
+        """单元格内容变更后触发：直接保存 + 气泡提示。"""
         if row != self._editing_row or col != self._editing_col:
             return
 
@@ -257,19 +273,14 @@ class SheetDirectoryDialog(QDialog):
                 self._reapply_pending_filter()
                 return
 
-        reply = QMessageBox.question(
-            self, "确认修改",
-            f"确定要将「{self._old_text}」修改为「{new_text}」吗？",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-        )
-        if reply == QMessageBox.StandardButton.Yes:
-            # 先结束编辑会话，防止 _save_current_row 重建表格触发 cellChanged 递归弹窗
-            self._reset_edit_state()
-            self._save_current_row(row)
-        else:
-            self._revert_cell(row, col)
-            self._reset_edit_state()
-
+        # 直接保存，不再弹窗确认
+        self._reset_edit_state()
+        self._save_current_row(row)
+        label_map = {0: "序号", 1: "Sheet名称", 2: "数据库表名"}
+        col_label = label_map.get(col, "")
+        old_display = self._old_text[:20] + ("..." if len(self._old_text) > 20 else "")
+        new_display = new_text[:20] + ("..." if len(new_text) > 20 else "")
+        self._status_bar.showMessage(f"{col_label}: {old_display}  →  {new_display}", 2500)
         self._reapply_pending_filter()
 
     def _save_current_row(self, row: int):
@@ -342,11 +353,7 @@ class SheetDirectoryDialog(QDialog):
         r = {"id": None, "sheet_order": "", "sheet_name": "", "table_name": "", "last_import_time": ""}
         self._fill_row(row, r)
 
-        total = len(self._all_records) + 1
-        if self._filter_keyword:
-            self._count_label.setText(f"共 {total} 条（筛选 {self._table.rowCount()} 条）")
-        else:
-            self._count_label.setText(f"共 {total} 条记录")
+        self._count_label.setText(f"共 {self._table.rowCount()} 条")
 
     # ── 右键菜单（删除）──
 
@@ -386,3 +393,87 @@ class SheetDirectoryDialog(QDialog):
         # 从 _all_records 中移除，然后重建表格
         self._all_records = [r for r in self._all_records if r.get("id") != record_id]
         self._reload_table()
+
+    # ── 查找替换 ──
+
+    def _replace_all(self):
+        """在筛选结果内批量替换 Sheet名称 和 数据库表名。"""
+        if self._editing_row != -1:
+            QMessageBox.information(self, "提示", "请先结束当前单元格的编辑。")
+            return
+
+        # 强制同步筛选状态，确保「所见即所换」
+        self._filter_timer.stop()
+        self._apply_filter_immediately()
+
+        find_text = self._filter_input.text()
+        replace_text = self._replace_input.text()
+
+        if not find_text:
+            QMessageBox.information(self, "提示", "请先在搜索框中输入要查找的内容。")
+            return
+
+        # 获取筛选后的可见行（已同步）
+        keyword = self._filter_keyword.lower() if self._filter_keyword else ""
+        if keyword:
+            filtered = [r for r in self._all_records if keyword in r.get("sheet_name", "").lower()]
+        else:
+            filtered = list(self._all_records)
+
+        if not filtered:
+            self._status_bar.showMessage("没有匹配的记录", 2000)
+            return
+
+        # 统计将被替换的次数
+        total_replacements = 0
+        for r in filtered:
+            sheet_name = r.get("sheet_name", "")
+            table_name = r.get("table_name", "")
+            total_replacements += sheet_name.count(find_text)
+            total_replacements += table_name.count(find_text)
+
+        if total_replacements == 0:
+            self._status_bar.showMessage(f"未找到「{find_text}」", 3000)
+            return
+
+        reply = QMessageBox.question(
+            self, "确认替换",
+            f"将在 {len(filtered)} 行中替换 {total_replacements} 处「{find_text}」→「{replace_text}」，确定继续？",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # 执行替换
+        replaced_count = 0
+        for r in filtered:
+            record_id = r.get("id")
+            if record_id is None:
+                continue
+
+            sheet_name = r.get("sheet_name", "")
+            table_name = r.get("table_name", "")
+            new_sheet_name = sheet_name.replace(find_text, replace_text)
+            new_table_name = table_name.replace(find_text, replace_text)
+
+            if new_sheet_name == sheet_name and new_table_name == table_name:
+                continue
+
+            try:
+                local_db.update_sheet_mapping(
+                    record_id,
+                    int(r.get("sheet_order", 0)) or 0,
+                    new_sheet_name,
+                    new_table_name,
+                )
+                replaced_count += (sheet_name.count(find_text) + table_name.count(find_text))
+            except Exception as e:
+                QMessageBox.critical(self, "替换失败", f"更新记录失败：{e}")
+                break
+
+        # 刷新数据
+        self._load_all_data()
+        self._status_bar.showMessage(
+            f"已替换 {replaced_count} 处「{find_text}」→「{replace_text}」",
+            4000,
+        )

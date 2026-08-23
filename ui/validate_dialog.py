@@ -38,12 +38,9 @@ class ValidateWorker(QThread):
                 f"验证完成，发现 {result['total_errors']} 个错误"
                 f"（分布在 {len(result['errors_by_sheet'])} 个 Sheet 中）:\n"
             )
-            for sheet_name, errors in result["errors_by_sheet"].items():
-                self.log.emit(f"\n{'='*50}")
-                self.log.emit(f"Sheet: {sheet_name}（共 {len(errors)} 个错误）")
-                self.log.emit(f"{'='*50}")
-                for err in errors:
-                    self.log.emit(err)
+            for sheet_name, sheet_data in result["errors_by_sheet"].items():
+                self.log.emit(sheet_data["formatted"])
+                self.log.emit("")
 
         if result.get("error"):
             self.log.emit(f"\n错误: {result['error']}")

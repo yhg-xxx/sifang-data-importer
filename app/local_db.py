@@ -5,6 +5,8 @@ import sqlite3
 import sys
 from datetime import datetime
 
+from app.utils import col_letter
+
 DB_FILE_NAME = "local.db"
 
 # ── DDL ──
@@ -397,7 +399,7 @@ def get_column_mapping_with_desc() -> list[dict]:
                 "col_order": r[0],
                 "db_column": r[1],
                 "excel_index": r[2],
-                "excel_col": _index_to_col_letter(r[2]),
+                "excel_col": col_letter(r[2] + 1),
                 "description": r[3],
                 "constraint_desc": r[4] or "",
             }
@@ -405,13 +407,3 @@ def get_column_mapping_with_desc() -> list[dict]:
         ]
     finally:
         conn.close()
-
-
-def _index_to_col_letter(idx: int) -> str:
-    """将 0-based 列索引转为 Excel 列字母（0→A, 1→B, ..., 25→Z, 26→AA）。"""
-    result = ""
-    idx += 1  # 转为 1-based
-    while idx > 0:
-        idx, rem = divmod(idx - 1, 26)
-        result = chr(rem + 65) + result
-    return result
