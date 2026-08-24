@@ -52,11 +52,14 @@ class SheetReaderWorker(QThread):
 class MainWindow(QMainWindow):
     """用户成功连接数据库后显示的主窗口。"""
 
-    def __init__(self, conn, db_info: str, schema: str = "dbo", parent=None):
+    connection_switch_requested = Signal()
+
+    def __init__(self, conn, db_info: str, schema: str = "dbo", connection_name: str = "", parent=None):
         super().__init__(parent)
         self._conn = conn
         self._db_info = db_info
         self._schema = schema
+        self._connection_name = connection_name
         self._excel_path = ""
         self._sheets = []
         self._reader_worker = None
@@ -75,6 +78,11 @@ class MainWindow(QMainWindow):
     def _setup_ui(self):
         # ── 菜单栏 ──
         menu_bar = self.menuBar()
+
+        switch_conn_action = QAction("切换连接", self)
+        switch_conn_action.setShortcut(QKeySequence("Ctrl+Shift+C"))
+        switch_conn_action.triggered.connect(self._switch_connection)
+        menu_bar.addAction(switch_conn_action)
 
         dir_action = QAction("Sheet名-表映射", self)
         dir_action.setShortcut(QKeySequence("Ctrl+N"))
@@ -187,7 +195,20 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_layout)
 
     def _setup_status_bar(self):
-        self.statusBar().showMessage(f"已连接: {self._db_info}")
+        if self._connection_name:
+            self.statusBar().showMessage(f"当前连接: {self._connection_name}  |  {self._db_info}")
+        else:
+            self.statusBar().showMessage(f"已连接: {self._db_info}")
+
+    def _switch_connection(self):
+        """请求切换连接：关闭当前窗口，通知main.py重新走连接流程。"""
+        try:
+            if self._conn:
+                self._conn.close()
+        except Exception:
+            pass
+        self.connection_switch_requested.emit()
+        self.close()
 
     def _select_file(self):
         path, _ = QFileDialog.getOpenFileName(

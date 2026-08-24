@@ -462,7 +462,7 @@ class SheetDirectoryDialog(QDialog):
             try:
                 local_db.update_sheet_mapping(
                     record_id,
-                    int(r.get("sheet_order", 0)) or 0,
+                    int(r.get("sheet_order", 0)) if r.get("sheet_order") else 0,
                     new_sheet_name,
                     new_table_name,
                 )

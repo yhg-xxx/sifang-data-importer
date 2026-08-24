@@ -14,6 +14,7 @@ DB_FILE_NAME = "local.db"
 CREATE_DB_CONNECTIONS = """
 CREATE TABLE IF NOT EXISTS db_connections (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    name        TEXT    NOT NULL DEFAULT '',
     server      TEXT    NOT NULL,
     database    TEXT    NOT NULL,
     schema_name TEXT    NOT NULL DEFAULT 'dbo',
@@ -79,6 +80,10 @@ def init_db() -> None:
         conn.execute(CREATE_SHEET_NAMES)
         conn.execute(CREATE_COLUMN_MAPPING)
 
+        # ── 迁移：为已有数据库添加 name 列 ──
+        _migrate_add_column_if_missing(conn, "db_connections", "name", "TEXT NOT NULL DEFAULT ''")
+        _migrate_backfill_connection_names(conn)
+
         # ── 迁移：为已有数据库添加 last_import_time 列 ──
         _migrate_add_column_if_missing(conn, "sheet_names", "last_import_time", "TEXT")
 
@@ -132,6 +137,14 @@ def _migrate_backfill_constraint_desc(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_backfill_connection_names(conn: sqlite3.Connection) -> None:
+    """为已有 db_connections 记录补填 name 字段（仅更新 name 为空的记录）。"""
+    conn.execute(
+        "UPDATE db_connections SET name = server || '/' || database "
+        "WHERE name IS NULL OR name = ''"
+    )
+
+
 def _seed_sheet_names(conn: sqlite3.Connection) -> None:
     """从 sheet_names.txt 读取数据，写入 sheet_names 表。
 
@@ -182,44 +195,99 @@ def _seed_column_mapping(conn: sqlite3.Connection) -> None:
 
 
 # ═══════════════════════════════════════════════════
-# db_connections 操作（替代 config.ini）
+# db_connections 操作（多连接管理）
 # ═══════════════════════════════════════════════════
 
-def load_connection() -> dict:
-    """读取上次使用的数据库连接配置。
+def _row_to_connection_dict(row) -> dict:
+    """将查询结果行转换为连接配置字典。"""
+    return {
+        "id": row[0],
+        "name": row[1],
+        "server": row[2],
+        "database": row[3],
+        "schema": row[4],
+        "username": row[5],
+        "password": row[6],
+    }
+
+
+def get_all_connections() -> list[dict]:
+    """返回所有保存的数据库连接，按 is_last_used 降序、updated_at 降序排列。
 
     返回:
-        {"server": "", "database": "", "schema": "dbo", "username": "", "password": ""}
+        [{"id": 1, "name": "第一组库", "server": "...", "database": "...",
+          "schema": "dbo", "username": "...", "password": "..."}, ...]
     """
     conn = _get_conn()
     try:
-        conn.execute(CREATE_DB_CONNECTIONS)  # 确保表存在
-        row = conn.execute(
-            "SELECT server, database, schema_name, username, password "
-            "FROM db_connections WHERE is_last_used = 1 LIMIT 1"
-        ).fetchone()
-
-        if row is None:
-            return {
-                "server": "", "database": "", "schema": "dbo",
-                "username": "", "password": "",
-            }
-
-        return {
-            "server": row[0],
-            "database": row[1],
-            "schema": row[2],
-            "username": row[3],
-            "password": row[4],
-        }
+        conn.execute(CREATE_DB_CONNECTIONS)
+        rows = conn.execute(
+            "SELECT id, name, server, database, schema_name, username, password "
+            "FROM db_connections ORDER BY is_last_used DESC, updated_at DESC"
+        ).fetchall()
+        return [_row_to_connection_dict(r) for r in rows]
     finally:
         conn.close()
 
 
-def save_connection(config: dict) -> None:
-    """保存数据库连接配置（设为上次使用，用于下次登录自动填充）。
+def get_connection_by_id(conn_id: int) -> dict | None:
+    """根据 id 获取单个连接配置，不存在则返回 None。"""
+    conn = _get_conn()
+    try:
+        conn.execute(CREATE_DB_CONNECTIONS)
+        row = conn.execute(
+            "SELECT id, name, server, database, schema_name, username, password "
+            "FROM db_connections WHERE id = ?",
+            (conn_id,),
+        ).fetchone()
+        return _row_to_connection_dict(row) if row else None
+    finally:
+        conn.close()
 
-    先检查是否已有相同 server+database 的记录，有则更新，无则插入。
+
+def get_last_connection() -> dict | None:
+    """获取上次使用的连接配置，不存在则返回 None。"""
+    conn = _get_conn()
+    try:
+        conn.execute(CREATE_DB_CONNECTIONS)
+        row = conn.execute(
+            "SELECT id, name, server, database, schema_name, username, password "
+            "FROM db_connections WHERE is_last_used = 1 LIMIT 1"
+        ).fetchone()
+        return _row_to_connection_dict(row) if row else None
+    finally:
+        conn.close()
+
+
+def load_connection() -> dict:
+    """读取上次使用的数据库连接配置（兼容旧接口，不含id）。
+
+    返回:
+        {"server": "", "database": "", "schema": "dbo", "username": "", "password": ""}
+    """
+    c = get_last_connection()
+    if c is None:
+        return {
+            "server": "", "database": "", "schema": "dbo",
+            "username": "", "password": "",
+        }
+    return {
+        "server": c["server"],
+        "database": c["database"],
+        "schema": c["schema"],
+        "username": c["username"],
+        "password": c["password"],
+    }
+
+
+def save_connection(config: dict) -> int:
+    """保存数据库连接配置（设为上次使用）。
+
+    如果 config 中有 "id" 且 id > 0，则更新对应记录；
+    否则检查是否有相同 server+database 的记录，有则更新，无则插入。
+    name 为空时自动生成 "{server}/{database}"。
+
+    返回新记录或更新记录的 id。
     """
     conn = _get_conn()
     try:
@@ -227,34 +295,94 @@ def save_connection(config: dict) -> None:
         conn.execute("BEGIN")
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-        server = config.get("server", "")
-        database = config.get("database", "")
-        schema_name = config.get("schema", "dbo")
-        username = config.get("username", "")
+        conn_id = config.get("id")
+        name = (config.get("name") or "").strip()
+        server = config.get("server", "").strip()
+        database = config.get("database", "").strip()
+        schema_name = (config.get("schema") or "dbo").strip() or "dbo"
+        username = config.get("username", "").strip()
         password = config.get("password", "")
+
+        if not name:
+            name = f"{server}/{database}"
 
         # 清除所有 is_last_used
         conn.execute("UPDATE db_connections SET is_last_used = 0")
 
-        # 查找是否已有相同 server+database 的记录
-        row = conn.execute(
-            "SELECT id FROM db_connections WHERE server = ? AND database = ?",
-            (server, database),
-        ).fetchone()
-
-        if row:
+        if conn_id and conn_id > 0:
+            # 按 id 更新
             conn.execute(
-                "UPDATE db_connections SET schema_name = ?, username = ?, password = ?, "
-                "is_last_used = 1, updated_at = ? WHERE id = ?",
-                (schema_name, username, password, now, row[0]),
+                "UPDATE db_connections SET name = ?, server = ?, database = ?, "
+                "schema_name = ?, username = ?, password = ?, is_last_used = 1, "
+                "updated_at = ? WHERE id = ?",
+                (name, server, database, schema_name, username, password, now, conn_id),
             )
+            saved_id = conn_id
         else:
-            conn.execute(
-                "INSERT INTO db_connections "
-                "(server, database, schema_name, username, password, is_last_used, created_at, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, 1, ?, ?)",
-                (server, database, schema_name, username, password, now, now),
-            )
+            # 查找是否已有相同 server+database 的记录
+            row = conn.execute(
+                "SELECT id FROM db_connections WHERE server = ? AND database = ?",
+                (server, database),
+            ).fetchone()
+
+            if row:
+                saved_id = row[0]
+                conn.execute(
+                    "UPDATE db_connections SET name = ?, schema_name = ?, "
+                    "username = ?, password = ?, is_last_used = 1, updated_at = ? "
+                    "WHERE id = ?",
+                    (name, schema_name, username, password, now, saved_id),
+                )
+            else:
+                cur = conn.execute(
+                    "INSERT INTO db_connections "
+                    "(name, server, database, schema_name, username, password, "
+                    "is_last_used, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
+                    (name, server, database, schema_name, username, password, now, now),
+                )
+                saved_id = cur.lastrowid
+
+        conn.commit()
+        return saved_id
+    except Exception:
+        try:
+            conn.rollback()
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def delete_connection(conn_id: int) -> None:
+    """删除指定 id 的数据库连接。
+
+    如果删除的是当前 is_last_used 的连接，自动将最新的一条记录设为 is_last_used=1。
+    """
+    conn = _get_conn()
+    try:
+        conn.execute(CREATE_DB_CONNECTIONS)
+        conn.execute("BEGIN")
+
+        # 检查是否是最后使用的连接
+        row = conn.execute(
+            "SELECT is_last_used FROM db_connections WHERE id = ?", (conn_id,)
+        ).fetchone()
+        was_last_used = row is not None and row[0] == 1
+
+        conn.execute("DELETE FROM db_connections WHERE id = ?", (conn_id,))
+
+        if was_last_used:
+            # 将最新更新的记录设为 last_used
+            newest = conn.execute(
+                "SELECT id FROM db_connections ORDER BY updated_at DESC LIMIT 1"
+            ).fetchone()
+            if newest:
+                conn.execute(
+                    "UPDATE db_connections SET is_last_used = 1 WHERE id = ?",
+                    (newest[0],),
+                )
 
         conn.commit()
     except Exception:
