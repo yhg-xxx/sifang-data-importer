@@ -21,15 +21,19 @@ class ColumnMappingDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("列映射")
-        self.setMinimumSize(620, 440)
+        self.setMinimumSize(660, 480)
+        self.resize(720, 520)
         self._setup_ui()
         self._load_data()
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
 
         # ── 标题 ──
         self._count_label = QLabel()
+        self._count_label.setProperty("secondary", True)
         layout.addWidget(self._count_label)
 
         # ── 表格 ──
@@ -43,6 +47,7 @@ class ColumnMappingDialog(QDialog):
         self._table.setAlternatingRowColors(True)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(34)
 
         # 列宽
         self._table.setColumnWidth(0, 50)

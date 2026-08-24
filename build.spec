@@ -32,6 +32,7 @@ a = Analysis(
         'ui.import_dialog',
         'ui.main_window',
         'ui.sheet_directory_dialog',
+        'ui.theme',
         'ui.validate_dialog',
     ],
     hookspath=[],

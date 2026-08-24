@@ -12,13 +12,13 @@ from PySide6.QtWidgets import (
     QAbstractItemView,
     QMenu,
     QMessageBox,
-    QStatusBar,
     QSizePolicy,
 )
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtGui import QAction
 
 from app import local_db
+from ui.toast import toast
 
 ROLE_ID = Qt.ItemDataRole.UserRole
 FILTER_DEBOUNCE_MS = 200
@@ -54,10 +54,13 @@ class SheetDirectoryDialog(QDialog):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
 
         # ── 顶部：计数 + 搜索框 + 新增按钮 ──
         top_layout = QHBoxLayout()
         self._count_label = QLabel()
+        self._count_label.setProperty("secondary", True)
         top_layout.addWidget(self._count_label)
         top_layout.addSpacing(12)
 
@@ -93,6 +96,7 @@ class SheetDirectoryDialog(QDialog):
 
         add_btn = QPushButton("新增")
         add_btn.setMinimumWidth(80)
+        add_btn.setProperty("class", "primary")
         add_btn.setAutoDefault(False)
         add_btn.clicked.connect(self._add_row)
         top_layout.addWidget(add_btn)
@@ -107,6 +111,8 @@ class SheetDirectoryDialog(QDialog):
         self._table.setAlternatingRowColors(True)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.verticalHeader().setVisible(False)
+        # 行高需容纳编辑时的 QLineEdit（含内边距与边框），过矮会遮挡编辑框
+        self._table.verticalHeader().setDefaultSectionSize(40)
 
         self._table.setColumnWidth(0, 60)
         self._table.setColumnWidth(1, 200)
@@ -133,11 +139,6 @@ class SheetDirectoryDialog(QDialog):
         btn_layout.addWidget(close_btn)
         btn_layout.addStretch()
         layout.addLayout(btn_layout)
-
-        # ── 状态栏（原生 Qt 提示） ──
-        self._status_bar = QStatusBar()
-        self._status_bar.setMaximumHeight(24)
-        layout.addWidget(self._status_bar)
 
     # ── 数据加载 ──
 
@@ -267,7 +268,7 @@ class SheetDirectoryDialog(QDialog):
             try:
                 int(new_text)
             except ValueError:
-                QMessageBox.warning(self, "输入错误", "序号必须为整数。")
+                toast.warning(self, "序号必须为整数")
                 self._revert_cell(row, col)
                 self._reset_edit_state()
                 self._reapply_pending_filter()
@@ -278,9 +279,7 @@ class SheetDirectoryDialog(QDialog):
         self._save_current_row(row)
         label_map = {0: "序号", 1: "Sheet名称", 2: "数据库表名"}
         col_label = label_map.get(col, "")
-        old_display = self._old_text[:20] + ("..." if len(self._old_text) > 20 else "")
-        new_display = new_text[:20] + ("..." if len(new_text) > 20 else "")
-        self._status_bar.showMessage(f"{col_label}: {old_display}  →  {new_display}", 2500)
+        toast.success(self, f"{col_label}: {self._old_text} → {new_text}", duration_ms=2500)
         self._reapply_pending_filter()
 
     def _save_current_row(self, row: int):
@@ -393,13 +392,14 @@ class SheetDirectoryDialog(QDialog):
         # 从 _all_records 中移除，然后重建表格
         self._all_records = [r for r in self._all_records if r.get("id") != record_id]
         self._reload_table()
+        toast.success(self, "已删除")
 
     # ── 查找替换 ──
 
     def _replace_all(self):
         """在筛选结果内批量替换 Sheet名称 和 数据库表名。"""
         if self._editing_row != -1:
-            QMessageBox.information(self, "提示", "请先结束当前单元格的编辑。")
+            toast.info(self, "请先结束当前单元格的编辑")
             return
 
         # 强制同步筛选状态，确保「所见即所换」
@@ -410,7 +410,7 @@ class SheetDirectoryDialog(QDialog):
         replace_text = self._replace_input.text()
 
         if not find_text:
-            QMessageBox.information(self, "提示", "请先在搜索框中输入要查找的内容。")
+            toast.info(self, "请先在搜索框中输入要查找的内容")
             return
 
         # 获取筛选后的可见行（已同步）
@@ -421,7 +421,7 @@ class SheetDirectoryDialog(QDialog):
             filtered = list(self._all_records)
 
         if not filtered:
-            self._status_bar.showMessage("没有匹配的记录", 2000)
+            toast.info(self, "没有匹配的记录")
             return
 
         # 统计将被替换的次数
@@ -433,7 +433,7 @@ class SheetDirectoryDialog(QDialog):
             total_replacements += table_name.count(find_text)
 
         if total_replacements == 0:
-            self._status_bar.showMessage(f"未找到「{find_text}」", 3000)
+            toast.warning(self, f"未找到「{find_text}」")
             return
 
         reply = QMessageBox.question(
@@ -473,7 +473,6 @@ class SheetDirectoryDialog(QDialog):
 
         # 刷新数据
         self._load_all_data()
-        self._status_bar.showMessage(
-            f"已替换 {replaced_count} 处「{find_text}」→「{replace_text}」",
-            4000,
+        toast.success(
+            self, f"已替换 {replaced_count} 处「{find_text}」→「{replace_text}」"
         )

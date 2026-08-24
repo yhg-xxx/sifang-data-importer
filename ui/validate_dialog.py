@@ -5,6 +5,7 @@ from PySide6.QtCore import QThread, Signal
 from app.validator import validate_excel
 from app.constants import ERROR_CONTACT
 from ui.base_task_dialog import BaseTaskDialog
+from ui.theme import DANGER, SUCCESS
 
 
 class ValidateWorker(QThread):
@@ -80,9 +81,9 @@ class ValidateDialog(BaseTaskDialog):
 
         if result["valid"]:
             self._status_label.setText("验证通过！所有数据符合约束。")
-            self._status_label.setStyleSheet("color: green; font-weight: bold;")
+            self._status_label.setStyleSheet(f"color: {SUCCESS}; font-weight: bold;")
         else:
             self._status_label.setText(
                 f"验证完成，发现 {result['total_errors']} 个错误"
             )
-            self._status_label.setStyleSheet("color: red; font-weight: bold;")
+            self._status_label.setStyleSheet(f"color: {DANGER}; font-weight: bold;")

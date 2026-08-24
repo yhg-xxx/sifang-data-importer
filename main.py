@@ -7,6 +7,7 @@ from PySide6.QtWidgets import QApplication, QMessageBox
 
 from ui.connection_dialog import ConnectionDialog
 from ui.main_window import MainWindow
+from ui.theme import apply_theme
 
 # ── 初始化本地 SQLite 数据库 ──
 from app import local_db
@@ -33,6 +34,7 @@ def main():
 
     app = QApplication(sys.argv)
     app.setApplicationName("四方数据导入工具")
+    apply_theme(app)
 
     # ── 连接对话框 ──
     conn_dialog = ConnectionDialog()

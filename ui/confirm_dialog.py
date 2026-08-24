@@ -37,12 +37,14 @@ class ConfirmDialog(QDialog):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
 
         # ── 顶部提示 ──
         self._header_label = QLabel(
             f"即将{self._action_label}以下 {len(self._selected_sheets)} 个 Sheet："
         )
-        self._header_label.setStyleSheet("font-size: 14px; font-weight: bold;")
+        self._header_label.setObjectName("dialogTitle")
         layout.addWidget(self._header_label)
 
         # ── 表格（3列） ──
@@ -56,6 +58,7 @@ class ConfirmDialog(QDialog):
         self._table.setAlternatingRowColors(True)
         self._table.horizontalHeader().setStretchLastSection(True)
         self._table.verticalHeader().setVisible(False)
+        self._table.verticalHeader().setDefaultSectionSize(34)
 
         self._table.setColumnWidth(0, 60)
         self._table.setColumnWidth(1, 160)
@@ -82,6 +85,7 @@ class ConfirmDialog(QDialog):
 
         self._confirm_btn = QPushButton("确认")
         self._confirm_btn.setMinimumWidth(80)
+        self._confirm_btn.setProperty("class", "primary")
         self._confirm_btn.clicked.connect(self._on_confirm)
         btn_layout.addWidget(self._confirm_btn)
         layout.addLayout(btn_layout)

@@ -8,13 +8,13 @@ from PySide6.QtWidgets import (
     QFormLayout,
     QLineEdit,
     QPushButton,
-    QLabel,
     QMessageBox,
 )
 
 from app import config
 from app import database as db_module
 from app.constants import ERROR_CONTACT
+from ui.toast import toast
 
 
 class ConnectWorker(QThread):
@@ -69,8 +69,11 @@ class ConnectionDialog(QDialog):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 24, 24, 24)
+        layout.setSpacing(14)
 
         form = QFormLayout()
+        form.setVerticalSpacing(12)
         self._server_edit = QLineEdit()
         self._server_edit.setPlaceholderText("例如：192.168.1.100")
         form.addRow("服务器地址:", self._server_edit)
@@ -94,10 +97,6 @@ class ConnectionDialog(QDialog):
         form.addRow("密码:", self._password_edit)
         layout.addLayout(form)
 
-        self._status_label = QLabel("")
-        self._status_label.setWordWrap(True)
-        layout.addWidget(self._status_label)
-
         btn_layout = QHBoxLayout()
         self._test_btn = QPushButton("测试连接")
         self._test_btn.clicked.connect(self._test_connection)
@@ -107,6 +106,7 @@ class ConnectionDialog(QDialog):
 
         self._connect_btn = QPushButton("连接")
         self._connect_btn.setDefault(True)
+        self._connect_btn.setProperty("class", "primary")
         self._connect_btn.clicked.connect(self._connect)
         btn_layout.addWidget(self._connect_btn)
 
@@ -133,16 +133,11 @@ class ConnectionDialog(QDialog):
             self._password_edit.text(),
         )
 
-    def _set_status(self, text: str, is_error: bool = False):
-        self._status_label.setText(text)
-        color = "red" if is_error else "green"
-        self._status_label.setStyleSheet(f"color: {color};")
-
     def _start_worker(self, test_only: bool):
         """启动后台连接线程，返回是否已启动。"""
         server, db_name, schema, username, password = self._get_params()
         if not server or not db_name:
-            QMessageBox.warning(self, "参数不完整", "请填写服务器地址和数据库名")
+            toast.warning(self, "请填写服务器地址和数据库名")
             return False
 
         if test_only:
@@ -151,7 +146,6 @@ class ConnectionDialog(QDialog):
         else:
             self._connect_btn.setEnabled(False)
             self._connect_btn.setText("连接中...")
-        self._status_label.setText("")
         self._pending_params = (server, db_name, schema, username, password)
 
         self._worker = ConnectWorker(
@@ -173,12 +167,11 @@ class ConnectionDialog(QDialog):
     def _on_test_ok(self, msg: str):
         self._test_btn.setText("测试连接")
         self._test_btn.setEnabled(True)
-        self._set_status(msg, is_error=False)
+        toast.success(self, msg)
 
     def _on_test_error(self, msg: str):
         self._test_btn.setText("测试连接")
         self._test_btn.setEnabled(True)
-        self._status_label.setText("")
         QMessageBox.warning(self, "连接失败", f"{msg}\n\n{ERROR_CONTACT}")
 
     def _connect(self):

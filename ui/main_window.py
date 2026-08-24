@@ -5,6 +5,7 @@ import time
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
+    QFrame,
     QVBoxLayout,
     QHBoxLayout,
     QPushButton,
@@ -27,6 +28,7 @@ from ui.import_dialog import ImportDialog
 from ui.validate_dialog import ValidateDialog
 from ui.sheet_directory_dialog import SheetDirectoryDialog
 from ui.column_mapping_dialog import ColumnMappingDialog
+from ui.toast import toast
 from ui.confirm_dialog import ConfirmDialog
 
 
@@ -96,11 +98,14 @@ class MainWindow(QMainWindow):
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
 
         # ── 文件选择区 ──
         file_layout = QHBoxLayout()
         self._file_label = QLabel("未选择文件")
         self._file_label.setWordWrap(True)
+        self._file_label.setProperty("secondary", True)
         file_layout.addWidget(self._file_label, 1)
 
         self._select_btn = QPushButton("选择文件")
@@ -113,8 +118,15 @@ class MainWindow(QMainWindow):
         file_layout.addWidget(self._clear_btn)
         layout.addLayout(file_layout)
 
-        # ── Sheet 概览（表格，含勾选框） ──
+        # ── Sheet 概览（白色卡片：表格 + 全选行） ──
+        card = QFrame()
+        card.setObjectName("card")
+        card_layout = QVBoxLayout(card)
+        card_layout.setContentsMargins(12, 8, 12, 8)
+        card_layout.setSpacing(6)
+
         self._sheet_table = QTableWidget()
+        self._sheet_table.setObjectName("innerTable")
         self._sheet_table.setColumnCount(4)
         self._sheet_table.setHorizontalHeaderLabels([
             "", "序号", "Sheet名称", "最后导入时间",
@@ -122,25 +134,33 @@ class MainWindow(QMainWindow):
         self._sheet_table.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
         self._sheet_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self._sheet_table.setAlternatingRowColors(True)
+        self._sheet_table.setShowGrid(False)
         self._sheet_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
         self._sheet_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
         self._sheet_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self._sheet_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
         self._sheet_table.verticalHeader().setVisible(False)
+        self._sheet_table.verticalHeader().setDefaultSectionSize(38)
 
         # 列0固定宽度（给 checkbox 留足够空间）
         self._sheet_table.setColumnWidth(0, 50)
 
-        layout.addWidget(self._sheet_table, 1)
+        card_layout.addWidget(self._sheet_table, 1)
 
-        # 全选 checkbox（独立于表格之外，置于表格左下方）
+        # 全选行（卡片底部：全选 checkbox + 已选计数）
         header_cb_layout = QHBoxLayout()
         self._header_cb = QCheckBox("全选")
         self._header_cb.setChecked(True)
         self._header_cb.stateChanged.connect(self._on_header_checkbox_clicked)
         header_cb_layout.addWidget(self._header_cb)
+
+        self._count_label = QLabel("")
+        self._count_label.setProperty("secondary", True)
+        header_cb_layout.addWidget(self._count_label)
         header_cb_layout.addStretch()
-        layout.addLayout(header_cb_layout)
+        card_layout.addLayout(header_cb_layout)
+
+        layout.addWidget(card, 1)
 
         # ── 按钮区 ──
         btn_layout = QHBoxLayout()
@@ -156,6 +176,7 @@ class MainWindow(QMainWindow):
         btn_layout.addSpacing(16)
 
         self._import_btn = QPushButton("开始导入")
+        self._import_btn.setProperty("class", "primary")
         self._import_btn.setEnabled(False)
         self._import_btn.setMinimumWidth(120)
         self._import_btn.setMinimumHeight(36)
@@ -214,6 +235,7 @@ class MainWindow(QMainWindow):
 
         file_name = self._excel_path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
         self._file_label.setText(f"已选择: {file_name}（读取用时 {elapsed}s）")
+        toast.success(self, f"读取完成：共 {len(sheets)} 个 Sheet")
 
     def _on_sheets_error(self, error_msg: str):
         """后台读取失败，恢复界面。"""
@@ -317,6 +339,8 @@ class MainWindow(QMainWindow):
             self._header_cb.setChecked(True)
         else:
             self._header_cb.setChecked(False)
+
+        self._count_label.setText(f"已选 {checked_count}/{total}")
 
         self._updating_header = False
 

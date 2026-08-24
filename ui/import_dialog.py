@@ -6,6 +6,7 @@ from app.importer import build_failure_result, run_import
 from app import database, config as app_config
 from app.constants import ERROR_CONTACT
 from ui.base_task_dialog import BaseTaskDialog
+from ui.theme import DANGER, SUCCESS
 
 
 class ImportWorker(QThread):
@@ -100,12 +101,12 @@ class ImportDialog(BaseTaskDialog):
             self._status_label.setText(
                 f"导入完成！共 {len(result['tables'])} 张表，{total_rows} 行数据"
             )
-            self._status_label.setStyleSheet("color: green; font-weight: bold;")
+            self._status_label.setStyleSheet(f"color: {SUCCESS}; font-weight: bold;")
             self._log_text.append("=" * 30)
             self._log_text.append(f"导入成功（数据库实际行数: {total_rows}）")
         else:
             self._status_label.setText("导入失败")
-            self._status_label.setStyleSheet("color: red; font-weight: bold;")
+            self._status_label.setStyleSheet(f"color: {DANGER}; font-weight: bold;")
             self._log_text.append("=" * 30)
             self._log_text.append(f"错误: {result.get('error', '')}")
             self._log_text.append(ERROR_CONTACT)

@@ -33,6 +33,8 @@ class BaseTaskDialog(QDialog):
 
     def _setup_ui(self):
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(12)
 
         # ── 进度条 ──
         self._progress_bar = QProgressBar()
@@ -42,14 +44,17 @@ class BaseTaskDialog(QDialog):
 
         # ── 状态文字 ──
         self._status_label = QLabel("准备中...")
+        self._status_label.setObjectName("statusText")
         layout.addWidget(self._status_label)
 
         # ── 已用时间 ──
         self._elapsed_label = QLabel("已用时: 00:00")
+        self._elapsed_label.setProperty("secondary", True)
         layout.addWidget(self._elapsed_label)
 
         # ── 日志区 ──
         self._log_text = QTextEdit()
+        self._log_text.setObjectName("logArea")
         self._log_text.setReadOnly(True)
         layout.addWidget(self._log_text, 1)
 
