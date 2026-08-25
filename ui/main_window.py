@@ -79,7 +79,7 @@ class MainWindow(QMainWindow):
         # ── 菜单栏 ──
         menu_bar = self.menuBar()
 
-        switch_conn_action = QAction("切换连接", self)
+        switch_conn_action = QAction("连接管理", self)
         switch_conn_action.setShortcut(QKeySequence("Ctrl+Shift+C"))
         switch_conn_action.triggered.connect(self._switch_connection)
         menu_bar.addAction(switch_conn_action)

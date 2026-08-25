@@ -72,6 +72,41 @@ QPushButton[class="primary"]:pressed {{ background-color: {PRIMARY_PRESSED}; bor
 QPushButton[class="primary"]:focus {{ border-color: {PRIMARY_PRESSED}; }}
 QPushButton[class="primary"]:disabled {{ background-color: {PRIMARY_DISABLED}; border-color: {PRIMARY_DISABLED}; color: #EFF4FE; }}
 
+/* ── 复选框 / 单选框 ── */
+QCheckBox, QRadioButton {{
+    spacing: 8px;
+    color: {TEXT};
+}}
+QCheckBox::indicator, QRadioButton::indicator {{
+    width: 18px;
+    height: 18px;
+    background-color: {CARD_BG};
+    border: 1px solid {BORDER_INPUT};
+    border-radius: 4px;
+}}
+QCheckBox::indicator:hover, QRadioButton::indicator:hover {{
+    border-color: {PRIMARY};
+}}
+QCheckBox::indicator:checked {{
+    background-color: {PRIMARY};
+    border-color: {PRIMARY};
+}}
+QCheckBox::indicator:checked:hover {{
+    background-color: {PRIMARY_HOVER};
+    border-color: {PRIMARY_HOVER};
+}}
+QCheckBox::indicator:disabled {{
+    background-color: #F3F4F6;
+    border-color: #E5E7EB;
+}}
+QRadioButton::indicator {{
+    border-radius: 9px;
+}}
+QRadioButton::indicator:checked {{
+    background-color: {CARD_BG};
+    border: 1px solid {PRIMARY};
+}}
+
 /* ── 输入框 ── */
 QLineEdit {{
     background-color: {CARD_BG};

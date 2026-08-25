@@ -1,6 +1,7 @@
 """数据库连接管理对话框 - 多连接管理"""
 
 from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -152,6 +153,12 @@ class ConnectionDialog(QDialog):
 
         # 按钮行
         btn_layout = QHBoxLayout()
+        self._pwd_toggle_btn = QPushButton("显示密码")
+        self._pwd_toggle_btn.setCheckable(True)
+        self._pwd_toggle_btn.clicked.connect(self._toggle_password_visible)
+        btn_layout.addWidget(self._pwd_toggle_btn)
+        btn_layout.addSpacing(8)
+
         self._test_btn = QPushButton("测试连接")
         self._test_btn.clicked.connect(self._test_connection)
         btn_layout.addWidget(self._test_btn)
@@ -220,6 +227,15 @@ class ConnectionDialog(QDialog):
         self._schema_edit.setText("dbo")
         self._username_edit.clear()
         self._password_edit.clear()
+
+    def _toggle_password_visible(self):
+        """切换密码显示/隐藏（勾选式按钮）。"""
+        if self._pwd_toggle_btn.isChecked():
+            self._password_edit.setEchoMode(QLineEdit.EchoMode.Normal)
+            self._pwd_toggle_btn.setText("隐藏密码")
+        else:
+            self._password_edit.setEchoMode(QLineEdit.EchoMode.Password)
+            self._pwd_toggle_btn.setText("显示密码")
 
     def _get_params(self) -> tuple:
         return (
