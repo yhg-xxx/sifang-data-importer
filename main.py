@@ -3,7 +3,8 @@
 import sys
 import traceback
 
-from PySide6.QtWidgets import QApplication, QMessageBox
+from PySide6.QtWidgets import QApplication, QMessageBox, QWidget, QVBoxLayout, QLabel
+from PySide6.QtCore import QThread, Signal, QEventLoop
 
 from ui.connection_dialog import ConnectionDialog
 from ui.main_window import MainWindow
@@ -28,15 +29,13 @@ def _global_excepthook(exc_type, exc_value, exc_tb):
     print(detail, file=sys.stderr)
 
 
-def _try_auto_connect() -> tuple | None:
-    """尝试自动连接上次使用的数据库。
+def _try_auto_connect_sync(last_cfg: dict | None) -> tuple | None:
+    """用给定配置尝试自动连接上次使用的数据库（在后台线程中调用）。
 
     返回 (conn, schema, connection_name, db_info) 元组，失败返回 None。
     """
-    last_cfg = local_db.get_last_connection()
     if not last_cfg:
         return None
-
     try:
         conn = db_module.connect(
             last_cfg["server"],
@@ -50,6 +49,49 @@ def _try_auto_connect() -> tuple | None:
         return None
 
 
+class AutoConnectThread(QThread):
+    """后台线程：尝试自动连接，避免启动阶段阻塞 GUI 线程。"""
+    result_ready = Signal(object)
+
+    def __init__(self, last_cfg, parent=None):
+        super().__init__(parent)
+        self._last_cfg = last_cfg
+
+    def run(self):
+        self.result_ready.emit(_try_auto_connect_sync(self._last_cfg))
+
+
+def _try_auto_connect_async(app: QApplication) -> tuple | None:
+    """在独立线程中尝试自动连接，期间显示「正在连接…」遮罩，避免无窗口冻结。"""
+    last_cfg = local_db.get_last_connection()
+    if not last_cfg:
+        return None
+
+    overlay = QWidget()
+    overlay.setWindowTitle("四方数据导入工具")
+    overlay_layout = QVBoxLayout(overlay)
+    overlay_layout.addWidget(QLabel("正在自动连接上次使用的数据库…"))
+    overlay.setFixedSize(340, 90)
+    overlay.show()
+    app.processEvents()
+
+    worker = AutoConnectThread(last_cfg)
+    loop = QEventLoop()
+    result_box = {}
+
+    def _on_result(r):
+        result_box["result"] = r
+        loop.quit()
+
+    worker.result_ready.connect(_on_result)
+    worker.start()
+    loop.exec()        # 运行真实事件循环，遮罩可正常重绘
+    worker.wait()
+
+    overlay.close()
+    return result_box.get("result")
+
+
 def main():
     sys.excepthook = _global_excepthook
 
@@ -57,7 +99,19 @@ def main():
     app.setApplicationName("四方数据导入工具")
     apply_theme(app)
 
-    skip_auto_connect = False
+    switch_requested = {"flag": False}    # 本轮主窗口是否因“连接管理”而关闭
+    skip_auto_connect = {"flag": False}   # 下一轮是否跳过自动连接（刚切换完，让用户重选）
+
+    def run_main_window(conn, db_info, schema, conn_name):
+        window = MainWindow(conn, db_info, schema, connection_name=conn_name)
+
+        def _on_switch():
+            switch_requested["flag"] = True
+
+        window.connection_switch_requested.connect(_on_switch)
+        window.show()
+        app.exec()
+        window.close()
 
     while True:
         conn = None
@@ -65,14 +119,13 @@ def main():
         conn_name = ""
         db_info = ""
 
-        # 第一次启动尝试自动连接；切换连接时直接弹对话框
-        if not skip_auto_connect:
-            auto_result = _try_auto_connect()
+        # 刚切换过连接 -> 不自动连，直接进入连接管理让用户重选
+        if not skip_auto_connect["flag"]:
+            auto_result = _try_auto_connect_async(app)
             if auto_result:
                 conn, schema, conn_name, db_info = auto_result
 
         if conn is None:
-            # 弹出连接管理对话框
             dialog = ConnectionDialog()
             if dialog.exec() != ConnectionDialog.DialogCode.Accepted:
                 return  # 用户取消，退出应用
@@ -87,28 +140,11 @@ def main():
             if cfg:
                 db_info = f"{cfg['server']}/{cfg['database']} (schema: {schema})"
 
-        # 重置标志，下次循环默认自动连接（正常重启时）
-        # 如果是切换连接触发的循环，下面会设置skip_auto_connect为False吗？
-        # 不——切换连接时，我们已经走完对话框了，下一轮如果再切还是会弹框，所以正常走完后重置
-        skip_auto_connect = False
+        run_main_window(conn, db_info, schema, conn_name)
 
-        # 创建主窗口
-        window = MainWindow(conn, db_info, schema, connection_name=conn_name)
-
-        # 监听切换连接请求
-        switch_requested = {"flag": False}
-
-        def _on_switch():
-            switch_requested["flag"] = True
-
-        window.connection_switch_requested.connect(_on_switch)
-        window.show()
-
-        app.exec()
-
-        # 检查是否需要切换连接
         if switch_requested["flag"]:
-            skip_auto_connect = True
+            switch_requested["flag"] = False   # 复位：下一轮主窗口视为正常关闭
+            skip_auto_connect["flag"] = True   # 下一轮不自动连，让用户选库
             try:
                 if conn:
                     conn.close()
@@ -116,7 +152,8 @@ def main():
                 pass
             continue
         else:
-            # 用户正常关闭窗口，退出
+            # 用户正常关闭窗口（含点 ✕），退出
+            skip_auto_connect["flag"] = False
             break
 
 

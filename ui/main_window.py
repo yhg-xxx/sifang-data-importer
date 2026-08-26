@@ -261,7 +261,7 @@ class MainWindow(QMainWindow):
     def _on_sheets_error(self, error_msg: str):
         """后台读取失败，恢复界面。"""
         self._load_timer.stop()
-        QMessageBox.critical(self, "读取失败", f"无法读取文件：{error_msg}\n\n{ERROR_CONTACT}")
+        QMessageBox.critical(self, "读取失败", f"无法读取文件：{error_msg}")
         self._sheets = []
         self._excel_path = ""
         self._import_btn.setEnabled(False)
@@ -526,6 +526,10 @@ class MainWindow(QMainWindow):
         if not self._conn or not self._excel_path:
             return
 
+        if not self._any_sheet_checked():
+            toast.warning(self, "请先勾选至少一个 Sheet 后再导入")
+            return
+
         selected = self._get_selected_sheets()
         if not selected:
             return
@@ -533,8 +537,6 @@ class MainWindow(QMainWindow):
         # 确认对话框
         confirm = ConfirmDialog("导入", selected, self._excel_path, self)
         if confirm.exec() != ConfirmDialog.DialogCode.Accepted:
-            return
-        if not confirm.is_confirmed():
             return
 
         dialog = ImportDialog(self._excel_path, self._schema, selected, self)
@@ -545,6 +547,10 @@ class MainWindow(QMainWindow):
         if not self._excel_path:
             return
 
+        if not self._any_sheet_checked():
+            toast.warning(self, "请先勾选至少一个 Sheet 后再验证")
+            return
+
         selected = self._get_selected_sheets()
         if not selected:
             return
@@ -553,8 +559,14 @@ class MainWindow(QMainWindow):
         confirm = ConfirmDialog("验证", selected, self._excel_path, self)
         if confirm.exec() != ConfirmDialog.DialogCode.Accepted:
             return
-        if not confirm.is_confirmed():
-            return
 
         dialog = ValidateDialog(self._excel_path, selected, self)
         dialog.exec()
+
+    def _any_sheet_checked(self) -> bool:
+        """是否有任一 Sheet 被勾选。"""
+        for row in range(self._sheet_table.rowCount()):
+            cb = self._get_checkbox(row)
+            if cb and cb.isChecked():
+                return True
+        return False

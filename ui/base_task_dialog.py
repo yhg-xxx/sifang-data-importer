@@ -26,6 +26,7 @@ class BaseTaskDialog(QDialog):
         super().__init__(parent)
         self.setModal(True)
         self._worker = None
+        self._indeterminate = False
         self._elapsed = QElapsedTimer()
         self._tick_timer = QTimer(self)
         self._tick_timer.timeout.connect(self._update_elapsed)
@@ -84,9 +85,18 @@ class BaseTaskDialog(QDialog):
 
     def _on_progress(self, current: int, total: int, message: str):
         """进度回调：更新进度条与状态文字。"""
-        if total > 0:
+        if not self._indeterminate and total > 0:
             self._progress_bar.setValue(int(current / total * 100))
         self._status_label.setText(message)
+
+    def set_indeterminate(self, on: bool):
+        """切换为「不确定（忙碌）」进度模式，适用于无法预估总量的长任务。"""
+        self._indeterminate = on
+        if on:
+            self._progress_bar.setRange(0, 0)
+        else:
+            self._progress_bar.setRange(0, 100)
+            self._progress_bar.setValue(0)
 
     def _on_log(self, line: str):
         self._log_text.append(line)
@@ -96,4 +106,6 @@ class BaseTaskDialog(QDialog):
         self._tick_timer.stop()
         self._update_elapsed()
         self._close_btn.setEnabled(True)
+        if self._indeterminate:
+            self._progress_bar.setRange(0, 100)
         self._progress_bar.setValue(100)

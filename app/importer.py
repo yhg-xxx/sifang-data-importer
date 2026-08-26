@@ -180,9 +180,22 @@ def _import_sheet(
                     excel_row, row_dict,
                     f"字段 [{', '.join(null_cols)}] 不能为空 (NOT NULL 约束)",
                 ))
-            else:
-                clean_rows.append(row_dict)
-                clean_row_nums.append(excel_row)
+                continue
+
+            # 日期字段(collected_at)预校验：给出清晰中文报错，
+            # 避免把脏值交给数据库后报出晦涩的 22018。
+            v = row_dict.get("collected_at")
+            if v is not None and isinstance(v, str) and v.strip():
+                if date_utils.parse_date(v) is None:
+                    all_errors.append((
+                        excel_row, row_dict,
+                        f"字段 [collected_at] 第 {excel_row} 行 值 '{v}' "
+                        f"不是有效日期（应形如 2024-01-31）",
+                    ))
+                    continue
+
+            clean_rows.append(row_dict)
+            clean_row_nums.append(excel_row)
 
         if not clean_rows:
             continue  # 本批没有可插入的有效行

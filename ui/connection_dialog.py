@@ -1,7 +1,6 @@
 """数据库连接管理对话框 - 多连接管理"""
 
 from PySide6.QtCore import QThread, Signal, Qt
-from PySide6.QtCore import QThread, Signal
 from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -196,7 +195,6 @@ class ConnectionDialog(QDialog):
             item = QListWidgetItem(display_name)
             item.setData(Qt.ItemDataRole.UserRole, c["id"])
             self._conn_list.addItem(item)
-            # 检查是否是 last_used（第一条就是，因为已按 is_last_used 排序）
 
         if self._connections:
             self._conn_list.setCurrentRow(0)

@@ -4,7 +4,7 @@ from PySide6.QtCore import QThread, Signal
 
 from app.importer import build_failure_result, run_import
 from app import database, config as app_config
-from app.constants import ERROR_CONTACT
+from app.error_msgs import humanize_db_error
 from ui.base_task_dialog import BaseTaskDialog
 from ui.theme import DANGER, SUCCESS
 
@@ -79,6 +79,10 @@ class ImportDialog(BaseTaskDialog):
         self._schema = schema
         self._selected_sheets = selected_sheets
 
+        # 单 sheet 导入（可能十几~二十万行）改用不确定进度，避免进度条长期卡在 0%
+        if selected_sheets and len(selected_sheets) == 1:
+            self.set_indeterminate(True)
+
         self._start_task()
 
     def _run_worker(self):
@@ -108,5 +112,4 @@ class ImportDialog(BaseTaskDialog):
             self._status_label.setText("导入失败")
             self._status_label.setStyleSheet(f"color: {DANGER}; font-weight: bold;")
             self._log_text.append("=" * 30)
-            self._log_text.append(f"错误: {result.get('error', '')}")
-            self._log_text.append(ERROR_CONTACT)
+            self._log_text.append(f"错误: {humanize_db_error(result.get('error', ''))}")
