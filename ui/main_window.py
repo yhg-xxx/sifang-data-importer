@@ -20,16 +20,19 @@ from PySide6.QtWidgets import (
     QMessageBox,
 )
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import QAction, QBrush, QColor, QKeySequence
 
 from app import excel_reader, local_db
 from app.constants import ERROR_CONTACT
 from ui.import_dialog import ImportDialog
 from ui.validate_dialog import ValidateDialog
+from ui.dedup_settings_dialog import DedupSettingsDialog
+from ui.dedup_dialog import DedupDialog
 from ui.sheet_directory_dialog import SheetDirectoryDialog
 from ui.column_mapping_dialog import ColumnMappingDialog
 from ui.toast import toast
 from ui.confirm_dialog import ConfirmDialog
+from ui.theme import DANGER, TEXT
 
 
 class SheetReaderWorker(QThread):
@@ -68,6 +71,7 @@ class MainWindow(QMainWindow):
         self._loading_file_name = ""
         self._updating_header = False  # 防止表头 checkbox 更新递归
         self._anchor_row = -1  # Shift 范围勾选的锚点行
+        self._help_dlg = None  # 使用说明窗口（非模态，复用同一实例）
 
         self.setWindowTitle("四方数据导入工具")
         self.setMinimumSize(900, 620)
@@ -174,6 +178,15 @@ class MainWindow(QMainWindow):
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
 
+        self._dedup_btn = QPushButton("开始去重")
+        self._dedup_btn.setEnabled(False)
+        self._dedup_btn.setMinimumWidth(120)
+        self._dedup_btn.setMinimumHeight(36)
+        self._dedup_btn.clicked.connect(self._start_dedup)
+        btn_layout.addWidget(self._dedup_btn)
+
+        btn_layout.addSpacing(16)
+
         self._validate_btn = QPushButton("验证数据")
         self._validate_btn.setEnabled(False)
         self._validate_btn.setMinimumWidth(120)
@@ -220,6 +233,10 @@ class MainWindow(QMainWindow):
         if not path:
             return
 
+        self._load_file(path)
+
+    def _load_file(self, path: str):
+        """载入指定 Excel：设路径并后台读取 Sheet（选择文件与去重完成后自动切换共用）。"""
         self._excel_path = path
         file_name = path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
         self._set_loading_state(file_name)
@@ -236,6 +253,7 @@ class MainWindow(QMainWindow):
         self._clear_btn.setVisible(False)
         self._import_btn.setEnabled(False)
         self._validate_btn.setEnabled(False)
+        self._dedup_btn.setEnabled(False)
         self._file_label.setText(f"正在读取: {file_name} ...")
         self._sheet_table.setRowCount(0)
 
@@ -251,12 +269,16 @@ class MainWindow(QMainWindow):
         self._update_sheet_info()
         self._import_btn.setEnabled(True)
         self._validate_btn.setEnabled(True)
+        self._dedup_btn.setEnabled(True)
         self._select_btn.setEnabled(True)
         self._clear_btn.setVisible(True)
 
         file_name = self._excel_path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
         self._file_label.setText(f"已选择: {file_name}（读取用时 {elapsed}s）")
         toast.success(self, f"读取完成：共 {len(sheets)} 个 Sheet")
+
+        # 检测上次导入失败的 Sheet，提示一键只勾选它们补录
+        self._offer_failed_reimport()
 
     def _on_sheets_error(self, error_msg: str):
         """后台读取失败，恢复界面。"""
@@ -266,6 +288,7 @@ class MainWindow(QMainWindow):
         self._excel_path = ""
         self._import_btn.setEnabled(False)
         self._validate_btn.setEnabled(False)
+        self._dedup_btn.setEnabled(False)
         self._select_btn.setEnabled(True)
         self._clear_btn.setVisible(False)
         self._file_label.setText("未选择文件")
@@ -280,6 +303,7 @@ class MainWindow(QMainWindow):
         self._sheet_table.setRowCount(0)
         self._import_btn.setEnabled(False)
         self._validate_btn.setEnabled(False)
+        self._dedup_btn.setEnabled(False)
         self._clear_btn.setVisible(False)
         self._file_label.setText("未选择文件")
 
@@ -289,9 +313,12 @@ class MainWindow(QMainWindow):
         self._file_label.setText(f"正在读取: {self._loading_file_name} ... (已用时 {elapsed}s)")
 
     def _update_sheet_info(self):
-        # 从 SQLite 获取 sheet→最后导入时间 的映射
+        # 从 SQLite 获取 sheet→最后导入时间/导入状态 的映射
         mappings = local_db.get_sheet_names()
         time_map = {m["sheet_name"]: m["last_import_time"] for m in mappings}
+        failed_set = {
+            m["sheet_name"] for m in mappings if m.get("last_import_status") == "failed"
+        }
 
         self._anchor_row = -1  # 表格重建后重置 Shift 锚点
         self._sheet_table.setRowCount(len(self._sheets))
@@ -316,8 +343,11 @@ class MainWindow(QMainWindow):
             idx_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._sheet_table.setItem(i, 1, idx_item)
 
-            # Sheet名称（列2）
+            # Sheet名称（列2）— 上次导入失败的 Sheet 标红提示待补录
             name_item = QTableWidgetItem(name)
+            if name in failed_set:
+                name_item.setForeground(QBrush(QColor(DANGER)))
+                name_item.setToolTip("上次导入失败：待业务修正后补录")
             self._sheet_table.setItem(i, 2, name_item)
 
             # 最后导入时间（列3）
@@ -415,18 +445,30 @@ class MainWindow(QMainWindow):
                 cb.setChecked(all_checked)
         self._updating_header = False
 
-    def _refresh_import_times(self):
-        """导入完成后刷新最后导入时间列。"""
+    def _refresh_import_states(self):
+        """导入完成后刷新最后导入时间列与失败红标。"""
         if not self._sheets:
             return
         mappings = local_db.get_sheet_names()
         time_map = {m["sheet_name"]: m["last_import_time"] for m in mappings}
+        failed_set = {
+            m["sheet_name"] for m in mappings if m.get("last_import_status") == "failed"
+        }
         for i, sheet in enumerate(self._sheets):
             name = sheet["sheet_name"]
             last_time = time_map.get(name, "")
             time_item = QTableWidgetItem(last_time if last_time else "—")
             time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
             self._sheet_table.setItem(i, 3, time_item)
+
+            name_item = self._sheet_table.item(i, 2)
+            if name_item:
+                if name in failed_set:
+                    name_item.setForeground(QBrush(QColor(DANGER)))
+                    name_item.setToolTip("上次导入失败：待业务修正后补录")
+                else:
+                    name_item.setForeground(QBrush(QColor(TEXT)))
+                    name_item.setToolTip("")
 
     def _open_sheet_directory(self):
         dialog = SheetDirectoryDialog(self)
@@ -437,52 +479,13 @@ class MainWindow(QMainWindow):
         dialog.exec()
 
     def _show_about(self):
-        QMessageBox.information(
-            self,
-            "关于四方数据导入工具",
-            "将 Excel 文件中多个 Sheet 的数据批量导入 SQL Server。\n\n"
-            "━━━ 使用流程 ━━━\n\n"
-            "一、连接数据库\n"
-            "  启动后填写服务器地址、数据库名、用户名、密码 → 点击「测试连接」\n"
-            "  连接成功后方可进入主界面；配置会自动保存，下次启动自动填充。\n\n"
-            "二、选择 Excel 文件\n"
-            "  点击「选择文件」→ 选取 .xlsx 文件 → 程序自动读取全部 Sheet。\n"
-            "  读取完成后，表格中显示每个 Sheet 的序号、名称及最后导入时间。\n\n"
-            "三、勾选要处理的 Sheet\n"
-            "  默认全选，可通过行首复选框独立勾选/取消。\n"
-            "  点击「全选」可一键全选或取消全选。\n"
-            "  批量勾选连续区间：先勾选起始行，再按住 Shift 点击结束行，\n"
-            "  中间所有行会一并勾选（反向操作同理可批量取消）。\n\n"
-            "四、验证数据（可选）\n"
-            "  点击「验证数据」→ 确认映射 → 对 Excel 数据进行离线校验：\n"
-            "  检查 NOT NULL 约束、字段长度限制、日期格式等，\n"
-            "  一次性找出所有错误并展示，不会写入数据库。\n\n"
-            "五、开始导入\n"
-            "  点击「开始导入」→ 确认映射 → 逐表执行：\n"
-            "  清空目标表 → 插入全部数据 → 提交事务。\n"
-            "  导入完成后显示每张表的实际行数及耗时。\n\n"
-            "━━━ 菜单功能 ━━━\n\n"
-            "【Sheet名-表映射】\n"
-            "  查看/管理 Sheet 与数据库表的对应关系：\n"
-            "  - 搜索框：输入关键词实时筛选 Sheet 名称（同时作为查找替换的查找内容）\n"
-            "  - 替换为 + 替换全部：在筛选结果内批量替换 Sheet名称 和 数据库表名\n"
-            "  - 双击单元格：编辑序号、Sheet名称或表名，回车确认保存\n"
-            "  - 选中右键行：删除当前映射\n"
-            "  - «新增»按钮：添加新的映射关系\n"
-            "  - «重置»按钮：清空筛选条件\n\n"
-            "【列映射】\n"
-            "  查看 Excel 列与数据库字段的对应关系（只读）。\n"
-            "  查看 Excel 列的约束条件。\n\n"
-            "【使用说明】\n"
-            "  显示本帮助文档。\n\n"
-            "━━━ 注意事项 ━━━\n\n"
-            "  导入为全量覆盖模式（先删后插），请谨慎操作。\n"
-            "  某 Sheet 导入失败不影响其他 Sheet（逐表独立事务）。\n"
-            "  导入前请确保 SQL Server 中目标表已建好。\n\n"
-            "遇到错误请联系：\n"
-            "  世贸项目部-数据组-王霖霖\n"
-            "  世贸项目部-数据组-张同宁",
-        )
+        """打开「使用说明」帮助窗口（非模态，可边看边操作）。"""
+        if self._help_dlg is None:
+            from ui.help_dialog import HelpDialog
+            self._help_dlg = HelpDialog(self)
+        self._help_dlg.show()
+        self._help_dlg.raise_()
+        self._help_dlg.activateWindow()
 
     def _get_selected_sheets(self) -> list[dict]:
         """收集勾选的 sheet，通过 SQLite 映射查找对应表名。
@@ -541,7 +544,7 @@ class MainWindow(QMainWindow):
 
         dialog = ImportDialog(self._excel_path, self._schema, selected, self)
         dialog.exec()
-        self._refresh_import_times()
+        self._refresh_import_states()
 
     def _start_validate(self):
         if not self._excel_path:
@@ -562,6 +565,95 @@ class MainWindow(QMainWindow):
 
         dialog = ValidateDialog(self._excel_path, selected, self)
         dialog.exec()
+
+    def _get_selected_sheet_names(self) -> list[str]:
+        """收集勾选的 sheet 名称（去重只按名称处理，不涉及表映射）。"""
+        names = []
+        for row in range(self._sheet_table.rowCount()):
+            cb = self._get_checkbox(row)
+            if cb and cb.isChecked():
+                name_item = self._sheet_table.item(row, 2)
+                if name_item:
+                    names.append(name_item.text())
+        return names
+
+    def _start_dedup(self):
+        if not self._excel_path:
+            return
+
+        if not self._any_sheet_checked():
+            toast.warning(self, "请先勾选至少一个 Sheet 后再去重")
+            return
+
+        selected_names = self._get_selected_sheet_names()
+        if not selected_names:
+            return
+
+        # 去重设置对话框（模式 + 判重列），摘要信息兼作去重前确认
+        settings = DedupSettingsDialog(self._excel_path, len(selected_names), self)
+        if settings.exec() != DedupSettingsDialog.DialogCode.Accepted:
+            return
+        options = settings.options() or {}
+
+        dialog = DedupDialog(
+            self._excel_path, selected_names,
+            options.get("mode", "sheet"), options.get("audit_col_index", 4), self,
+        )
+        dialog.exec()
+
+        # 去重成功且未取消：自动切换到去重后文件，可直接点「开始导入」
+        result = dialog.dedup_result
+        if (result and result.get("success") and not result.get("cancelled")
+                and result.get("output_path")):
+            toast.success(
+                self, f"去重完成：删除 {result.get('total_deleted', 0)} 行，已切换到去重后文件"
+            )
+            self._load_file(result["output_path"])
+
+    def _offer_failed_reimport(self):
+        """文件加载后检测上次导入失败的 Sheet，提示一键只勾选它们补录。
+
+        失败状态按表名持久化在本地 SQLite，跨文件有效：
+        业务修正后的定稿文件（文件名每周变化）加载时同样能提示。
+        """
+        failed_names = set(local_db.get_failed_sheet_names())
+        if not failed_names or self._sheet_table.rowCount() == 0:
+            return
+
+        hit_rows = []
+        for row in range(self._sheet_table.rowCount()):
+            name_item = self._sheet_table.item(row, 2)
+            if name_item and name_item.text() in failed_names:
+                hit_rows.append(row)
+        if not hit_rows:
+            return
+
+        preview = "、".join(
+            self._sheet_table.item(r, 2).text() for r in hit_rows[:8]
+        )
+        if len(hit_rows) > 8:
+            preview += f" 等 {len(hit_rows)} 个"
+
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle("一键补录")
+        box.setText(
+            f"检测到 {len(hit_rows)} 个 Sheet 上次导入失败：\n{preview}\n\n"
+            "是否只勾选这些 Sheet 进行补录？"
+        )
+        only_btn = box.addButton("只勾选失败 Sheet", QMessageBox.ButtonRole.YesRole)
+        box.addButton("保持全选", QMessageBox.ButtonRole.NoRole)
+        box.exec()
+        if box.clickedButton() is not only_btn:
+            return
+
+        for row in range(self._sheet_table.rowCount()):
+            cb = self._get_checkbox(row)
+            if cb:
+                cb.setChecked(row in hit_rows)
+        toast.success(
+            self, f"已只勾选 {len(hit_rows)} 个失败 Sheet，可直接「开始导入」补录"
+        )
 
     def _any_sheet_checked(self) -> bool:
         """是否有任一 Sheet 被勾选。"""

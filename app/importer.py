@@ -4,7 +4,7 @@ from datetime import datetime
 
 from python_calamine import CalamineWorkbook
 
-from app import database, date_utils, excel_reader, logger, local_db
+from app import database, date_utils, error_list, excel_reader, logger, local_db
 from app.utils import col_letter
 
 # 46 张目标表名
@@ -18,6 +18,7 @@ NOT_NULL_COLUMNS = ("company_name", "industry")
 
 # 缓存 column_mapping，避免每行数据都打开/关闭 SQLite 连接
 _COLUMN_MAPPING_CACHE = None
+_COLUMN_DISPLAY_CACHE = None
 
 
 def _get_column_mapping():
@@ -26,6 +27,29 @@ def _get_column_mapping():
     if _COLUMN_MAPPING_CACHE is None:
         _COLUMN_MAPPING_CACHE = local_db.get_column_mapping()
     return _COLUMN_MAPPING_CACHE
+
+
+def _get_column_display_map() -> dict[str, str]:
+    """延迟加载并缓存 db 字段名 → 「D列 企业名称」样式的显示名（错误名单用）。"""
+    global _COLUMN_DISPLAY_CACHE
+    if _COLUMN_DISPLAY_CACHE is None:
+        _COLUMN_DISPLAY_CACHE = {
+            m["db_column"]: f"{m['excel_col']}列 {m['description'] or m['db_column']}"
+            for m in local_db.get_column_mapping_with_desc()
+        }
+    return _COLUMN_DISPLAY_CACHE
+
+
+def _display_value(value) -> str:
+    """错误名单中的当前值展示：空值显示「（空）」，超长值截断。"""
+    if value is None:
+        return "（空）"
+    text = str(value)
+    if not text.strip():
+        return "（空）"
+    if len(text) > 60:
+        return text[:60] + "…"
+    return text
 
 
 def _to_date(value):
@@ -101,36 +125,38 @@ def _format_row_ranges(row_nums: list[int]) -> str:
 def _format_sheet_errors(
     sheet_name: str,
     table_name: str,
-    errors: list[tuple[int, dict, str]],
+    errors: list[dict],
     total_rows: int = 0,
 ) -> str:
-    """将整个 sheet 的错误行按数据库报错信息分组，格式化输出。
+    """将整个 sheet 的结构化错误按数据库报错信息分组，格式化输出。
 
+    errors 为 _import_sheet 收集的结构化错误 dict 列表。
     每组展示：错误类型 + 出错行号区间 + 前 3 条样例的列值明细。
     连续行号合并为区间（如 106450-106480），避免逐行刷屏；
     total_rows 为整个 sheet 已扫描的总行数，用于确认已全量扫描。
     """
     groups = {}
-    for excel_row, row_dict, err in errors:
-        groups.setdefault(err, []).append((excel_row, row_dict))
+    for err in errors:
+        groups.setdefault(err["message"], []).append(err)
 
     scanned = f"，已扫描整个 Sheet 共 {total_rows} 行" if total_rows else ""
     parts = [
         f"导入失败，表 [{table_name}] / Sheet [{sheet_name}] "
         f"共 {len(errors)} 行数据存在错误{scanned}:"
     ]
-    for err, items in groups.items():
-        parts.append(f"\n■ 错误类型（{len(items)} 行）: {err}")
-        parts.append(f"  出错行: {_format_row_ranges([rn for rn, _ in items])}")
+    for err_text, items in groups.items():
+        parts.append(f"\n■ 错误类型（{len(items)} 行）: {err_text}")
+        parts.append(f"  出错行: {_format_row_ranges([e['row'] for e in items])}")
 
         sample_count = min(3, len(items))
         parts.append(f"  样例（前 {sample_count} 条）:")
-        for excel_row, row_dict in items[:sample_count]:
+        for e in items[:sample_count]:
+            row_dict = e["values"]
             col_details = [
                 f"    {col_letter(idx + 1)}列 ({db_col}) = {repr(row_dict.get(db_col))}"
                 for db_col, idx in _get_column_mapping()
             ]
-            parts.append(f"  Excel 第 {excel_row} 行:")
+            parts.append(f"  Excel 第 {e['row']} 行:")
             parts.extend(col_details)
     return "\n".join(parts)
 
@@ -142,16 +168,22 @@ def _import_sheet(
     table_name: str,
     schema: str,
     progress_callback=None,
-) -> int:
-    """导入单个 sheet，返回导入行数。
+) -> tuple[int, list[dict], list[str]]:
+    """导入单个 sheet，返回 (扫描行数, 行级错误列表, 批量级错误信息列表)。
 
-    某批次批量插入失败时，对该批次逐行诊断并继续处理后续批次，
-    收集整个 sheet 的所有错误；全部批次处理完后再统一抛出。
+    数据错误不再抛异常（由调用方汇总为失败表后继续导入下一表）；
+    只有基础设施级错误（如连接断开）才会向上抛出。
+
+    行级错误为结构化 dict：
+        {"row": Excel行号, "message": 完整错误文本, "kind": "null"/"date"/"db",
+         "fields": [(列名显示, 当前值显示), ...], "values": 整行字段 dict}
+    fields 供错误名单 xlsx 使用；kind 供名单归类问题类型。
     """
     sheet_rows = 0
     all_errors = []
     bulk_error_msgs = []
     batch_index = 0
+    display_map = _get_column_display_map()
 
     for batch_start_row, batch in excel_reader.iter_sheet_rows_from_workbook(
         wb, sheet_name, BATCH_SIZE
@@ -176,10 +208,16 @@ def _import_sheet(
                 )
             ]
             if null_cols:
-                all_errors.append((
-                    excel_row, row_dict,
-                    f"字段 [{', '.join(null_cols)}] 不能为空 (NOT NULL 约束)",
-                ))
+                all_errors.append({
+                    "row": excel_row,
+                    "values": row_dict,
+                    "kind": "null",
+                    "message": f"字段 [{', '.join(null_cols)}] 不能为空 (NOT NULL 约束)",
+                    "fields": [
+                        (display_map.get(col, col), _display_value(row_dict.get(col)))
+                        for col in null_cols
+                    ],
+                })
                 continue
 
             # 日期字段(collected_at)预校验：给出清晰中文报错，
@@ -187,11 +225,17 @@ def _import_sheet(
             v = row_dict.get("collected_at")
             if v is not None and isinstance(v, str) and v.strip():
                 if date_utils.parse_date(v) is None:
-                    all_errors.append((
-                        excel_row, row_dict,
-                        f"字段 [collected_at] 第 {excel_row} 行 值 '{v}' "
-                        f"不是有效日期（应形如 2024-01-31）",
-                    ))
+                    all_errors.append({
+                        "row": excel_row,
+                        "values": row_dict,
+                        "kind": "date",
+                        "message": f"字段 [collected_at] 第 {excel_row} 行 值 '{v}' "
+                                   f"不是有效日期（应形如 2024-01-31）",
+                        "fields": [
+                            (display_map.get("collected_at", "collected_at"),
+                             _display_value(v))
+                        ],
+                    })
                     continue
 
             clean_rows.append(row_dict)
@@ -216,23 +260,137 @@ def _import_sheet(
                 conn, table_name, clean_rows, clean_row_nums, schema,
             )
             if batch_errors:
-                all_errors.extend(batch_errors)
+                for excel_row, row_dict, err in batch_errors:
+                    all_errors.append({
+                        "row": excel_row,
+                        "values": row_dict,
+                        "kind": "db",
+                        "message": err,
+                        "fields": [],
+                    })
             else:
                 # fast_executemany 类型推断等批量特有原因：单行全部插入成功
                 bulk_error_msgs.append(str(e))
         finally:
-            batch_cursor.close()
+            try:
+                batch_cursor.close()
+            except Exception:
+                pass
 
-    if all_errors:
-        raise ValueError(
-            _format_sheet_errors(sheet_name, table_name, all_errors, sheet_rows)
+    return sheet_rows, all_errors, bulk_error_msgs
+
+
+def _safe_rollback(conn) -> None:
+    """回滚当前事务；连接已断开时 rollback 自身可能抛错，忽略以保证流程继续。"""
+    try:
+        conn.rollback()
+    except Exception:
+        pass
+
+
+def _connection_alive(conn) -> bool:
+    """检测连接是否仍然可用（SELECT 1）；用于区分表级错误与连接级错误。"""
+    try:
+        cur = conn.cursor()
+    except Exception:
+        return False
+    try:
+        cur.execute("SELECT 1")
+        return True
+    except Exception:
+        return False
+    finally:
+        try:
+            cur.close()
+        except Exception:
+            pass
+
+
+def _record_failed(
+    failed_tables: dict,
+    table_name: str,
+    sheet_name: str,
+    error_text: str,
+    row_errors: list,
+    progress_callback=None,
+) -> None:
+    """记录一张失败表（状态持久化失败不影响导入流程），并提示继续。"""
+    failed_tables[table_name] = {
+        "sheet_name": sheet_name,
+        "error": error_text,
+        "errors": row_errors,
+    }
+    try:
+        local_db.update_import_result(table_name, False)
+    except Exception:
+        pass
+    if progress_callback:
+        progress_callback(0, 0, f"表 [{table_name}] 导入失败，已跳过，继续下一表...")
+
+
+def _import_one_sheet(
+    conn,
+    wb,
+    sheet_name: str,
+    table_name: str,
+    schema: str,
+    table_row_counts: dict,
+    failed_tables: dict,
+    progress_callback=None,
+) -> None:
+    """导入单表：成功则提交并记入 table_row_counts；数据/表级错误则回滚该表、
+    记入 failed_tables 后返回（流程继续后续表）；连接级错误向上抛出中止整个流程。"""
+    cursor = conn.cursor()
+    cursor.fast_executemany = True
+    try:
+        # 清空当前表（无 TRUNCATE 权限，使用 DELETE）
+        database.delete_all_tables(cursor, [table_name], schema)
+
+        # 流式写入当前表
+        sheet_rows, row_errors, bulk_error_msgs = _import_sheet(
+            conn, wb, sheet_name, table_name, schema, progress_callback,
         )
-    if bulk_error_msgs:
-        raise ValueError(
-            "批量插入失败，但逐行诊断未发现异常数据，原始数据库报错：\n"
-            + "\n\n".join(bulk_error_msgs)
+
+        if row_errors or bulk_error_msgs:
+            _safe_rollback(conn)
+            error_text = (
+                _format_sheet_errors(sheet_name, table_name, row_errors, sheet_rows)
+                if row_errors
+                else "批量插入失败，但逐行诊断未发现异常数据，原始数据库报错：\n"
+                     + "\n\n".join(bulk_error_msgs)
+            )
+            _record_failed(
+                failed_tables, table_name, sheet_name, error_text, row_errors,
+                progress_callback,
+            )
+            return
+
+        table_row_counts[table_name] = sheet_rows
+
+        # pyodbc autocommit=False 时需用 conn.commit() 提交 ODBC 层事务
+        conn.commit()
+    except Exception as e:
+        _safe_rollback(conn)
+        if not _connection_alive(conn):
+            # 连接级错误：后续表必然全部失败，中止整个流程
+            raise
+        # 表级错误（权限、锁等）：记录后继续后续表
+        _record_failed(
+            failed_tables, table_name, sheet_name, str(e), [],
+            progress_callback,
         )
-    return sheet_rows
+    else:
+        # 成功后才记录状态与最后导入时间（状态写入失败不影响已提交的数据）
+        import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        try:
+            local_db.update_import_result(table_name, True, import_time)
+        except Exception:
+            pass
+    finally:
+        try:
+            cursor.close()
+        except Exception:
+            pass
 
 
 def build_failure_result(
@@ -240,15 +398,19 @@ def build_failure_result(
     start_time: str = "",
     tables: dict | None = None,
     error: str = "",
+    failed_tables: dict | None = None,
 ) -> dict:
     """构造失败的导入结果 dict（run_import 与工作线程共用，避免重复组装）。"""
     return {
         "success": False,
+        "partial": False,
         "file": file_name,
         "start_time": start_time,
         "end_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "tables": tables or {},
+        "failed_tables": failed_tables or {},
         "error": error,
+        "error_list_path": "",
     }
 
 
@@ -261,6 +423,10 @@ def run_import(
 ) -> dict:
     """执行完整导入流程。
 
+    逐表独立事务：某表数据错误时仅回滚该表、记录失败并继续导入后续表，
+    全部表处理完后汇总「部分成功」结果；仅连接断开等基础设施错误中止整个流程。
+    有失败表时自动在源文件同目录生成错误名单 xlsx。
+
     参数:
         conn: pyodbc.Connection 对象
         excel_path: .xlsx 文件路径
@@ -270,17 +436,21 @@ def run_import(
 
     返回:
         {
-            "success": bool,
+            "success": bool,          # 是否全部成功
+            "partial": bool,          # 是否部分成功（有失败表但流程完整走完）
             "file": str,
             "start_time": str,
             "end_time": str,
-            "tables": {表名: 行数},
-            "error": str (失败时有值),
+            "tables": {表名: 行数},   # 成功的表
+            "failed_tables": {表名: {"sheet_name": str, "error": str, "errors": [dict]}},
+            "error": str,             # 失败汇总 / 致命错误文本（成功时为空）
+            "error_list_path": str,   # 自动生成的错误名单 xlsx 路径（如有）
         }
     """
     start_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     file_name = excel_path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
     table_row_counts = {}
+    failed_tables = {}
 
     if not selected_sheets:
         raise ValueError("未选择任何 Sheet 进行导入")
@@ -307,43 +477,17 @@ def run_import(
         wb = CalamineWorkbook.from_path(excel_path)
 
         try:
-            # ── 3. 逐表导入，每表一个事务 ──
+            # ── 3. 逐表导入，每表一个事务；失败记录后继续下一表 ──
             for i, item in enumerate(selected_sheets):
-                sheet_name = item["sheet_name"]
-                table_name = item["table_name"]
-
                 if progress_callback:
                     progress_callback(
                         i, actual_count,
-                        f"正在导入 ({i+1}/{actual_count}) {table_name}..."
+                        f"正在导入 ({i+1}/{actual_count}) {item['table_name']}..."
                     )
-
-                cursor = conn.cursor()
-                cursor.fast_executemany = True
-                try:
-                    # 清空当前表（无 TRUNCATE 权限，使用 DELETE）
-                    database.delete_all_tables(cursor, [table_name], schema)
-
-                    # 流式写入当前表
-                    sheet_rows = _import_sheet(
-                        conn, wb, sheet_name, table_name, schema,
-                        progress_callback,
-                    )
-                    table_row_counts[table_name] = sheet_rows
-
-                    # pyodbc autocommit=False 时需用 conn.commit() 提交 ODBC 层事务
-                    conn.commit()
-
-                    # 记录最后导入时间
-                    import_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-                    local_db.update_last_import_time(table_name, import_time)
-
-                except Exception:
-                    conn.rollback()
-                    raise
-                finally:
-                    cursor.close()
-
+                _import_one_sheet(
+                    conn, wb, item["sheet_name"], item["table_name"], schema,
+                    table_row_counts, failed_tables, progress_callback,
+                )
         finally:
             wb.close()
 
@@ -351,19 +495,40 @@ def run_import(
             progress_callback(actual_count, actual_count, "导入完成")
 
         end_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+        # ── 4. 有失败表时自动生成错误名单 xlsx（生成失败不影响导入结果） ──
+        error_list_path = ""
+        list_note = ""
+        if failed_tables:
+            try:
+                error_list_path = error_list.generate_error_list(
+                    excel_path, failed_tables,
+                )
+            except Exception as e:
+                list_note = f"（错误名单生成失败: {e}）"
+
+        fail_count = len(failed_tables)
         result = {
-            "success": True,
+            "success": fail_count == 0,
+            "partial": fail_count > 0,
             "file": file_name,
             "start_time": start_time,
             "end_time": end_time,
             "tables": table_row_counts,
-            "error": "",
+            "failed_tables": failed_tables,
+            "error": (
+                f"{fail_count} 张表导入失败：{'、'.join(failed_tables)}{list_note}"
+                if fail_count else ""
+            ),
+            "error_list_path": error_list_path,
         }
 
     except Exception as e:
-        result = build_failure_result(file_name, start_time, table_row_counts, str(e))
+        result = build_failure_result(
+            file_name, start_time, table_row_counts, str(e), failed_tables,
+        )
 
-    # ── 4. 记录日志 ──
+    # ── 5. 记录日志 ──
     try:
         logger.log_import(result)
     except Exception:

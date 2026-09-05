@@ -1,6 +1,6 @@
 """数据库连接管理对话框 - 多连接管理"""
 
-from PySide6.QtCore import QThread, Signal, Qt
+from PySide6.QtCore import QThread, Signal, Qt, QSize
 from PySide6.QtWidgets import (
     QDialog,
     QVBoxLayout,
@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QFrame,
     QLabel,
+    QSizePolicy,
 )
 
 from app import local_db
@@ -57,14 +58,68 @@ class ConnectWorker(QThread):
             self.error.emit(str(e))
 
 
+class ConnectionRow(QWidget):
+    """连接列表行控件：连接名（加粗）+ 灰字「服务器 · 数据库」副标题，右上可选「最近使用」标签。
+
+    整个行对鼠标事件透明，点击/悬停交给 QListWidget 原生处理（选中高亮一致）。
+    """
+
+    def __init__(self, name: str, subtitle: str, last_used: bool = False, parent=None):
+        super().__init__(parent)
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(12, 7, 10, 7)
+        lay.setSpacing(8)
+
+        text_col = QVBoxLayout()
+        text_col.setContentsMargins(0, 0, 0, 0)
+        text_col.setSpacing(2)
+
+        self._name = QLabel(name)
+        self._name.setStyleSheet("font-weight:600;")
+        self._name.setToolTip(name)
+        # 水平方向 Ignored：文本超宽时按可用宽度裁剪，不把右侧标签挤出可视区
+        self._name.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        text_col.addWidget(self._name)
+
+        self._subtitle = QLabel(subtitle)
+        self._subtitle.setProperty("secondary", True)
+        self._subtitle.setToolTip(subtitle)
+        self._subtitle.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        text_col.addWidget(self._subtitle)
+
+        lay.addLayout(text_col, 1)
+
+        if last_used:
+            tag = QLabel("最近使用")
+            tag.setObjectName("lastUsedTag")
+            tag.setAlignment(Qt.AlignmentFlag.AlignTop)
+            lay.addWidget(tag, 0, Qt.AlignmentFlag.AlignTop)
+
+    @classmethod
+    def build(cls, cfg: dict):
+        """根据连接配置构建行控件。
+
+        副标题 = 「服务器 · 数据库」，schema 非 dbo 时追加「 · schema名」。
+        """
+        parts = [p for p in (cfg.get("server", ""), cfg.get("database", "")) if p]
+        subtitle = " · ".join(parts)
+        schema = (cfg.get("schema") or "dbo").strip() or "dbo"
+        if schema.lower() != "dbo":
+            subtitle += f" · {schema}"
+        name = (cfg.get("name") or "").strip() or (subtitle or "未命名连接")
+        return cls(name, subtitle, bool(cfg.get("is_last_used")))
+
+
 class ConnectionDialog(QDialog):
     """数据库连接管理对话框 - 支持多连接保存、切换、新增、删除。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("数据库连接管理")
-        self.setMinimumWidth(720)
-        self.setMinimumHeight(460)
+        self.setMinimumWidth(780)
+        self.setMinimumHeight(480)
         self.setModal(True)
 
         self._conn = None
@@ -85,29 +140,36 @@ class ConnectionDialog(QDialog):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        # ── 左侧：连接列表 ──
+        # ── 左侧：连接列表（卡片容器） ──
         left_panel = QFrame()
+        left_panel.setObjectName("card")
         left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setContentsMargins(10, 10, 10, 10)
         left_layout.setSpacing(8)
 
+        list_header = QHBoxLayout()
         list_label = QLabel("已保存的连接")
         list_label.setProperty("secondary", True)
-        left_layout.addWidget(list_label)
+        list_header.addWidget(list_label)
+        list_header.addStretch()
+        left_layout.addLayout(list_header)
 
         self._conn_list = QListWidget()
-        self._conn_list.setMinimumWidth(200)
+        self._conn_list.setMinimumWidth(210)
         self._conn_list.currentRowChanged.connect(self._on_list_selection_changed)
         left_layout.addWidget(self._conn_list, 1)
 
         list_btn_layout = QHBoxLayout()
+        list_btn_layout.setSpacing(6)
         self._add_btn = QPushButton("新增")
+        self._add_btn.setMinimumWidth(0)
         self._add_btn.clicked.connect(self._add_new_connection)
-        list_btn_layout.addWidget(self._add_btn)
+        list_btn_layout.addWidget(self._add_btn, 1)
 
         self._delete_btn = QPushButton("删除")
+        self._delete_btn.setMinimumWidth(0)
         self._delete_btn.clicked.connect(self._delete_connection)
-        list_btn_layout.addWidget(self._delete_btn)
+        list_btn_layout.addWidget(self._delete_btn, 1)
         left_layout.addLayout(list_btn_layout)
 
         splitter.addWidget(left_panel)
@@ -179,7 +241,7 @@ class ConnectionDialog(QDialog):
 
         splitter.setStretchFactor(0, 0)
         splitter.setStretchFactor(1, 1)
-        splitter.setSizes([220, 480])
+        splitter.setSizes([270, 470])
 
         main_layout.addWidget(splitter, 1)
 
@@ -189,22 +251,35 @@ class ConnectionDialog(QDialog):
         self._connections = local_db.get_all_connections()
         self._conn_list.clear()
 
-        last_used_row = 0
-        for i, c in enumerate(self._connections):
-            display_name = c["name"]
-            item = QListWidgetItem(display_name)
-            item.setData(Qt.ItemDataRole.UserRole, c["id"])
-            self._conn_list.addItem(item)
-
         if self._connections:
+            for c in self._connections:
+                item = QListWidgetItem()
+                item.setData(Qt.ItemDataRole.UserRole, c["id"])
+                item.setSizeHint(QSize(0, 56))
+                self._conn_list.addItem(item)
+                self._conn_list.setItemWidget(item, ConnectionRow.build(c))
+            # 上次使用的连接排最前（SQL 排序），默认选中它
             self._conn_list.setCurrentRow(0)
             self._fill_form(self._connections[0])
         else:
+            self._add_empty_placeholder()
             self._clear_form()
             self._delete_btn.setEnabled(False)
 
         self._loading_list = False
         self._update_delete_btn_state()
+
+    def _add_empty_placeholder(self):
+        """无任何连接时，在列表区显示居中的灰色引导提示。"""
+        item = QListWidgetItem()
+        item.setFlags(Qt.ItemFlag.NoItemFlags)  # 不可选、不响应点击
+        item.setSizeHint(QSize(0, 170))
+        self._conn_list.addItem(item)
+
+        label = QLabel("还没有保存的连接\n点击「新增」开始创建")
+        label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        label.setProperty("secondary", True)
+        self._conn_list.setItemWidget(item, label)
 
     def _fill_form(self, conn_cfg: dict):
         """用连接配置填充表单。"""
@@ -257,7 +332,7 @@ class ConnectionDialog(QDialog):
 
     def _update_delete_btn_state(self):
         """更新删除按钮可用状态：至少有一个连接时才可用。"""
-        self._delete_btn.setEnabled(self._conn_list.count() > 0)
+        self._delete_btn.setEnabled(len(self._connections) > 0)
 
     def _add_new_connection(self):
         """新增连接：清空表单，取消列表选中。"""
@@ -274,7 +349,8 @@ class ConnectionDialog(QDialog):
         if current_item is None:
             return
         conn_id = current_item.data(Qt.ItemDataRole.UserRole)
-        conn_name = current_item.text()
+        conn_cfg = next((c for c in self._connections if c.get("id") == conn_id), None)
+        conn_name = (conn_cfg or {}).get("name", "") or "未命名连接"
 
         reply = QMessageBox.question(
             self,

@@ -102,9 +102,15 @@ QCheckBox::indicator:disabled {{
 QRadioButton::indicator {{
     border-radius: 9px;
 }}
+/* 选中 = 蓝色实心圆，与勾选框「选中=蓝色实心」同一视觉语言
+   （不能只改边框颜色：QSS 接管 indicator 后 Fusion 不再画中心点） */
 QRadioButton::indicator:checked {{
-    background-color: {CARD_BG};
+    background-color: {PRIMARY};
     border: 1px solid {PRIMARY};
+}}
+QRadioButton::indicator:checked:hover {{
+    background-color: {PRIMARY_HOVER};
+    border-color: {PRIMARY_HOVER};
 }}
 
 /* ── 输入框 ── */
@@ -195,6 +201,60 @@ QMenu::separator {{ height: 1px; background: #EEF1F6; margin: 4px 8px; }}
 QStatusBar {{ background: transparent; color: {TEXT_SECONDARY}; border-top: 1px solid {BORDER}; }}
 QStatusBar::item {{ border: none; }}
 QToolTip {{ background-color: {TEXT}; color: #FFFFFF; border: none; padding: 5px 8px; }}
+
+/* ── 连接管理左列表（QListWidget 行列表） ── */
+QListWidget {{
+    background: transparent;
+    border: none;
+    outline: none;
+    padding: 2px;
+}}
+QListWidget::item {{
+    border: none;
+    border-radius: 8px;
+    padding: 0px;
+    margin: 2px 0px;
+    background: transparent;
+}}
+QListWidget::item:hover {{ background: #EEF3FE; }}
+QListWidget::item:selected {{
+    background: #DCE7FC;
+    color: {TEXT};
+}}
+QListWidget::item:selected:!active {{ background: #DCE7FC; }}
+
+/* 连接行「最近使用」小标签 */
+QLabel#lastUsedTag {{
+    background-color: #E8F1FE;
+    color: #1D4ED8;
+    border: 1px solid #C7DAF7;
+    border-radius: 9px;
+    padding: 1px 8px;
+    font-size: 11px;
+    font-weight: 600;
+}}
+
+/* ── 使用说明：目录胶囊按钮 ── */
+QPushButton#navChip {{
+    background-color: #FFFFFF;
+    border: 1px solid {BORDER};
+    border-radius: 14px;
+    padding: 5px 16px;
+    color: #4B5563;
+    font-weight: 600;
+}}
+QPushButton#navChip:hover {{ background-color: #E8F1FE; border-color: #A9BCF0; color: {PRIMARY_HOVER}; }}
+QPushButton#navChip:pressed {{ background-color: #DCE7FC; }}
+
+/* ── 使用说明正文（QTextBrowser 富文本） ── */
+QTextBrowser {{
+    background-color: {CARD_BG};
+    border: 1px solid {BORDER};
+    border-radius: 10px;
+    padding: 10px;
+    selection-background-color: #C9D8FA;
+    selection-color: {TEXT};
+}}
 """
 
 

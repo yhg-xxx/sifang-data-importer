@@ -32,7 +32,8 @@ CREATE TABLE IF NOT EXISTS sheet_names (
     sheet_order      INTEGER NOT NULL,
     sheet_name       TEXT    NOT NULL,
     table_name       TEXT    NOT NULL,
-    last_import_time TEXT
+    last_import_time TEXT,
+    last_import_status TEXT
 );
 """
 
@@ -44,6 +45,13 @@ CREATE TABLE IF NOT EXISTS column_mapping (
     excel_index     INTEGER NOT NULL,
     description     TEXT    NOT NULL DEFAULT '',
     constraint_desc TEXT    NOT NULL DEFAULT ''
+);
+"""
+
+CREATE_DEDUP_SETTINGS = """
+CREATE TABLE IF NOT EXISTS dedup_settings (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
 );
 """
 
@@ -79,6 +87,7 @@ def init_db() -> None:
         conn.execute(CREATE_DB_CONNECTIONS)
         conn.execute(CREATE_SHEET_NAMES)
         conn.execute(CREATE_COLUMN_MAPPING)
+        conn.execute(CREATE_DEDUP_SETTINGS)
 
         # ── 迁移：为已有数据库添加 name 列 ──
         _migrate_add_column_if_missing(conn, "db_connections", "name", "TEXT NOT NULL DEFAULT ''")
@@ -86,6 +95,9 @@ def init_db() -> None:
 
         # ── 迁移：为已有数据库添加 last_import_time 列 ──
         _migrate_add_column_if_missing(conn, "sheet_names", "last_import_time", "TEXT")
+
+        # ── 迁移：为已有数据库添加 last_import_status 列（失败表记忆，用于一键补录） ──
+        _migrate_add_column_if_missing(conn, "sheet_names", "last_import_status", "TEXT")
 
         # ── 迁移：为已有数据库添加 constraint_desc 列 ──
         _migrate_add_column_if_missing(conn, "column_mapping", "constraint_desc", "TEXT")
@@ -208,6 +220,7 @@ def _row_to_connection_dict(row) -> dict:
         "schema": row[4],
         "username": row[5],
         "password": row[6],
+        "is_last_used": bool(row[7]),
     }
 
 
@@ -216,13 +229,14 @@ def get_all_connections() -> list[dict]:
 
     返回:
         [{"id": 1, "name": "第一组库", "server": "...", "database": "...",
-          "schema": "dbo", "username": "...", "password": "..."}, ...]
+          "schema": "dbo", "username": "...", "password": "...",
+          "is_last_used": True}, ...]
     """
     conn = _get_conn()
     try:
         conn.execute(CREATE_DB_CONNECTIONS)
         rows = conn.execute(
-            "SELECT id, name, server, database, schema_name, username, password "
+            "SELECT id, name, server, database, schema_name, username, password, is_last_used "
             "FROM db_connections ORDER BY is_last_used DESC, updated_at DESC"
         ).fetchall()
         return [_row_to_connection_dict(r) for r in rows]
@@ -236,7 +250,7 @@ def get_connection_by_id(conn_id: int) -> dict | None:
     try:
         conn.execute(CREATE_DB_CONNECTIONS)
         row = conn.execute(
-            "SELECT id, name, server, database, schema_name, username, password "
+            "SELECT id, name, server, database, schema_name, username, password, is_last_used "
             "FROM db_connections WHERE id = ?",
             (conn_id,),
         ).fetchone()
@@ -251,7 +265,7 @@ def get_last_connection() -> dict | None:
     try:
         conn.execute(CREATE_DB_CONNECTIONS)
         row = conn.execute(
-            "SELECT id, name, server, database, schema_name, username, password "
+            "SELECT id, name, server, database, schema_name, username, password, is_last_used "
             "FROM db_connections WHERE is_last_used = 1 LIMIT 1"
         ).fetchone()
         return _row_to_connection_dict(row) if row else None
@@ -405,13 +419,15 @@ def get_sheet_names() -> list[dict]:
     返回:
         [{"id": 1, "sheet_order": 1, "sheet_name": "房屋建筑",
           "table_name": "enterprise_info_001",
-          "last_import_time": "2026-07-20 14:30:00"}, ...]
-        last_import_time 未记录时为空字符串。"""
+          "last_import_time": "2026-07-20 14:30:00",
+          "last_import_status": "success"}, ...]
+        last_import_time 未记录时为空字符串；
+        last_import_status 为 'success' / 'failed'，未尝试过时为空字符串。"""
     conn = _get_conn()
     try:
         conn.execute(CREATE_SHEET_NAMES)
         rows = conn.execute(
-            "SELECT id, sheet_order, sheet_name, table_name, last_import_time "
+            "SELECT id, sheet_order, sheet_name, table_name, last_import_time, last_import_status "
             "FROM sheet_names ORDER BY sheet_order"
         ).fetchall()
         return [
@@ -421,6 +437,7 @@ def get_sheet_names() -> list[dict]:
                 "sheet_name": r[2],
                 "table_name": r[3],
                 "last_import_time": r[4] or "",
+                "last_import_status": r[5] or "",
             }
             for r in rows
         ]
@@ -468,20 +485,45 @@ def delete_sheet_mapping(record_id: int) -> None:
         conn.close()
 
 
-def update_last_import_time(table_name: str, import_time: str) -> None:
-    """更新指定表的最后导入时间。
+def update_import_result(table_name: str, success: bool, import_time: str = "") -> None:
+    """更新指定表的导入结果状态；成功时同时记录最后导入时间。
 
     参数:
         table_name: 数据库表名（如 enterprise_info_001）
-        import_time: 时间字符串（如 "2026-07-20 14:30:00"）
+        success: 本次导入是否成功
+        import_time: 时间字符串（如 "2026-07-20 14:30:00"，仅成功时使用）
+
+    last_import_status 取值 'success' / 'failed'（NULL 表示尚未尝试过），
+    用于主窗口失败红标与「一键补录」提示。
     """
     conn = _get_conn()
     try:
-        conn.execute(
-            "UPDATE sheet_names SET last_import_time = ? WHERE table_name = ?",
-            (import_time, table_name),
-        )
+        if success:
+            conn.execute(
+                "UPDATE sheet_names SET last_import_time = ?, last_import_status = 'success' "
+                "WHERE table_name = ?",
+                (import_time, table_name),
+            )
+        else:
+            conn.execute(
+                "UPDATE sheet_names SET last_import_status = 'failed' WHERE table_name = ?",
+                (table_name,),
+            )
         conn.commit()
+    finally:
+        conn.close()
+
+
+def get_failed_sheet_names() -> list[str]:
+    """返回上次导入失败的 sheet 名称列表（用于加载文件时的一键补录提示）。"""
+    conn = _get_conn()
+    try:
+        conn.execute(CREATE_SHEET_NAMES)
+        rows = conn.execute(
+            "SELECT sheet_name FROM sheet_names "
+            "WHERE last_import_status = 'failed' ORDER BY sheet_order"
+        ).fetchall()
+        return [r[0] for r in rows]
     finally:
         conn.close()
 
@@ -533,5 +575,51 @@ def get_column_mapping_with_desc() -> list[dict]:
             }
             for r in rows
         ]
+    finally:
+        conn.close()
+
+
+# ═══════════════════════════════════════════════════
+# dedup_settings 操作（去重设置持久化：模式 + 判重列）
+# ═══════════════════════════════════════════════════
+
+DEDUP_MODE_SHEET = "sheet"    # 按 Sheet 内去重
+DEDUP_MODE_GLOBAL = "global"  # 全局去重（跨 Sheet）
+
+DEFAULT_DEDUP_SETTINGS = {
+    "mode": DEDUP_MODE_GLOBAL,  # 每周例行流程使用全局去重
+    "audit_col_index": 4,       # D 列企业名称
+}
+
+
+def get_dedup_settings() -> dict:
+    """读取去重设置，无记录时返回默认值（全局去重、判重列 D）。"""
+    conn = _get_conn()
+    try:
+        conn.execute(CREATE_DEDUP_SETTINGS)
+        rows = conn.execute("SELECT key, value FROM dedup_settings").fetchall()
+        data = dict(DEFAULT_DEDUP_SETTINGS)
+        for key, value in rows:
+            if key in data:
+                data[key] = value
+        try:
+            data["audit_col_index"] = int(data["audit_col_index"])
+        except (TypeError, ValueError):
+            data["audit_col_index"] = DEFAULT_DEDUP_SETTINGS["audit_col_index"]
+        return data
+    finally:
+        conn.close()
+
+
+def save_dedup_settings(mode: str, audit_col_index: int) -> None:
+    """保存去重设置（key-value 覆盖写）。"""
+    conn = _get_conn()
+    try:
+        conn.execute(CREATE_DEDUP_SETTINGS)
+        conn.executemany(
+            "INSERT OR REPLACE INTO dedup_settings (key, value) VALUES (?, ?)",
+            [("mode", mode), ("audit_col_index", str(audit_col_index))],
+        )
+        conn.commit()
     finally:
         conn.close()

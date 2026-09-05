@@ -62,11 +62,20 @@ class BaseTaskDialog(QDialog):
         # ── 关闭按钮 ──
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
+        self._add_extra_buttons(btn_layout)
         self._close_btn = QPushButton("关闭")
         self._close_btn.setEnabled(False)
         self._close_btn.clicked.connect(self.close)
         btn_layout.addWidget(self._close_btn)
         layout.addLayout(btn_layout)
+
+    def _add_extra_buttons(self, btn_layout):
+        """子类可覆写：在关闭按钮左侧追加自有按钮（如「取消」）。
+
+        注意：本方法在基类构造时（子类 __init__ 体执行前）被调用，
+        覆写实现不应依赖子类 __init__ 中才创建的属性。
+        """
+        pass
 
     def _start_task(self):
         """开始任务：启动计时并创建后台 worker。"""
