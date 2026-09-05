@@ -5,7 +5,7 @@ from datetime import datetime
 from python_calamine import CalamineWorkbook
 
 from app import database, date_utils, error_list, excel_reader, logger, local_db
-from app.utils import col_letter
+from app.utils import merge_row_ranges
 
 # 46 张目标表名
 TABLE_NAMES = [f"enterprise_info_{i:03d}" for i in range(1, 47)]
@@ -108,31 +108,19 @@ def _format_row_ranges(row_nums: list[int]) -> str:
     单行显示为 '第 5 行'；多段区间用逗号连接，
     如 '第 5-8 行, 第 20-25 行, 第 30 行'。
     """
-    if not row_nums:
-        return ""
-    parts = []
-    start = prev = row_nums[0]
-    for rn in row_nums[1:]:
-        if rn == prev + 1:
-            prev = rn
-            continue
-        parts.append(f"{start}-{prev}" if start != prev else f"{start}")
-        start = prev = rn
-    parts.append(f"{start}-{prev}" if start != prev else f"{start}")
-    return ", ".join(f"第 {p} 行" for p in parts)
+    return ", ".join(f"第 {p} 行" for p in merge_row_ranges(row_nums))
 
 
 def _format_sheet_errors(
-    sheet_name: str,
-    table_name: str,
     errors: list[dict],
     total_rows: int = 0,
 ) -> str:
-    """将整个 sheet 的结构化错误按数据库报错信息分组，格式化输出。
+    """将整个 sheet 的结构化错误按数据库报错信息分组，格式化为精简文本。
 
     errors 为 _import_sheet 收集的结构化错误 dict 列表。
-    每组展示：错误类型 + 出错行号区间 + 前 3 条样例的列值明细。
-    连续行号合并为区间（如 106450-106480），避免逐行刷屏；
+    每组展示：错误类型 + 行数 + 出错行号区间；连续行号合并为区间
+    （如 106450-106480）避免逐行刷屏。不带表/Sheet 头（消费方自带），
+    也不展开列值样例——完整错误数据见错误名单 xlsx。
     total_rows 为整个 sheet 已扫描的总行数，用于确认已全量扫描。
     """
     groups = {}
@@ -141,23 +129,11 @@ def _format_sheet_errors(
 
     scanned = f"，已扫描整个 Sheet 共 {total_rows} 行" if total_rows else ""
     parts = [
-        f"导入失败，表 [{table_name}] / Sheet [{sheet_name}] "
         f"共 {len(errors)} 行数据存在错误{scanned}:"
     ]
     for err_text, items in groups.items():
-        parts.append(f"\n■ 错误类型（{len(items)} 行）: {err_text}")
-        parts.append(f"  出错行: {_format_row_ranges([e['row'] for e in items])}")
-
-        sample_count = min(3, len(items))
-        parts.append(f"  样例（前 {sample_count} 条）:")
-        for e in items[:sample_count]:
-            row_dict = e["values"]
-            col_details = [
-                f"    {col_letter(idx + 1)}列 ({db_col}) = {repr(row_dict.get(db_col))}"
-                for db_col, idx in _get_column_mapping()
-            ]
-            parts.append(f"  Excel 第 {e['row']} 行:")
-            parts.extend(col_details)
+        parts.append(f"  · {err_text}：{len(items)} 行")
+        parts.append(f"    出错行: {_format_row_ranges([e['row'] for e in items])}")
     return "\n".join(parts)
 
 
@@ -354,7 +330,7 @@ def _import_one_sheet(
         if row_errors or bulk_error_msgs:
             _safe_rollback(conn)
             error_text = (
-                _format_sheet_errors(sheet_name, table_name, row_errors, sheet_rows)
+                _format_sheet_errors(row_errors, sheet_rows)
                 if row_errors
                 else "批量插入失败，但逐行诊断未发现异常数据，原始数据库报错：\n"
                      + "\n\n".join(bulk_error_msgs)

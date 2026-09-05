@@ -16,7 +16,7 @@ from app import local_db
 
 
 class ColumnMappingDialog(QDialog):
-    """展示 Excel 列 → 数据库字段映射的模态对话框。"""
+    """展示 Excel 列 → 数据库字段映射的非模态对话框。"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -24,6 +24,10 @@ class ColumnMappingDialog(QDialog):
         self.setMinimumSize(660, 480)
         self.resize(720, 520)
         self._setup_ui()
+        self._load_data()
+
+    def reload_data(self):
+        """重新从 SQLite 加载映射数据（窗口复用时每次打开前调用）。"""
         self._load_data()
 
     def _setup_ui(self):

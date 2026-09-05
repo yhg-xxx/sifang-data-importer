@@ -10,6 +10,26 @@ def col_letter(idx: int) -> str:
     return letters
 
 
+def merge_row_ranges(row_nums: list[int]) -> list[str]:
+    """行号去重、升序后合并为连续区间段列表。
+
+    如 [140620, 140614, 140615] → ["140614-140615", "140620"]；单行段无连字符。
+    """
+    nums = sorted(set(row_nums))
+    parts: list[str] = []
+    start = prev = None
+    for rn in nums:
+        if start is not None and rn == prev + 1:
+            prev = rn
+            continue
+        if start is not None:
+            parts.append(f"{start}-{prev}" if start != prev else f"{start}")
+        start = prev = rn
+    if start is not None:
+        parts.append(f"{start}-{prev}" if start != prev else f"{start}")
+    return parts
+
+
 # 全角 ASCII（U+FF01~U+FF5E）→ 半角（减 0xFEE0），外加全角空格 U+3000 → 半角空格
 _FULLWIDTH_MAP = {code: code - 0xFEE0 for code in range(0xFF01, 0xFF5F)}
 _FULLWIDTH_MAP[0x3000] = 0x20

@@ -2,7 +2,7 @@
 
 导入结束后若有失败表，自动在源文件同目录生成
 「源文件名__导入错误名单_时间戳.xlsx」（目标已存在时加计数后缀，永不覆盖）：
-- 「汇总」sheet：按负责人聚合（可直接整段复制进群消息催办）
+- 「汇总」sheet：按负责人聚合，含错误行数与出错行区间（可直接整段复制进群消息催办）
 - 「明细」sheet：行级错误（Sheet、Excel行号、列名、当前值、问题描述、负责人）
 """
 
@@ -12,6 +12,7 @@ from datetime import datetime
 import xlsxwriter
 
 from app.error_msgs import humanize_db_error
+from app.utils import merge_row_ranges
 
 
 def _resolve_output_path(source_dir: str, source_stem: str) -> str:
@@ -50,7 +51,9 @@ def _collect(failed_tables: dict) -> tuple[dict, list]:
     """汇总失败表数据。
 
     返回 (summary, detail_rows)：
-    - summary: {(负责人, Sheet名称): {"count": 错误行数, "problems": [问题描述]}}
+    - summary: {(负责人, Sheet名称): {"rows": set[出错行号], "no_row": 无行号错误条数,
+                                        "problems": [问题描述]}}
+      错误行数按行号去重统计（同一行的多种错误只算一行），与出错行区间口径一致
     - detail_rows: [Sheet名称, Excel行号, 列名, 当前值, 问题描述, 负责人]
     """
     summary: dict = {}
@@ -73,8 +76,14 @@ def _collect(failed_tables: dict) -> tuple[dict, list]:
         for err in errors:
             values = err.get("values") or {}
             team = _clean_text(values.get("team")) or "（未填负责人）"
-            entry = summary.setdefault((team, sheet_name), {"count": 0, "problems": []})
-            entry["count"] += 1
+            entry = summary.setdefault(
+                (team, sheet_name), {"rows": set(), "no_row": 0, "problems": []},
+            )
+            row_no = err.get("row", "")
+            if isinstance(row_no, int):
+                entry["rows"].add(row_no)
+            else:
+                entry["no_row"] += 1
 
             problem = _problem_text(err)
             if problem not in entry["problems"]:
@@ -94,6 +103,16 @@ def _collect(failed_tables: dict) -> tuple[dict, list]:
                 )
 
     return summary, detail_rows
+
+
+def _entry_count(entry: dict) -> int:
+    """错误行数 = 去重行号数 + 无行号错误条数。"""
+    return len(entry["rows"]) + entry["no_row"]
+
+
+def _entry_ranges(entry: dict) -> str:
+    """出错行区间文本，如 '140614-140618、140620'；无行号时为空串。"""
+    return "、".join(merge_row_ranges(list(entry["rows"])))
 
 
 def generate_error_list(excel_path: str, failed_tables: dict) -> str:
@@ -125,27 +144,30 @@ def generate_error_list(excel_path: str, failed_tables: dict) -> str:
 
     # ── 汇总 sheet：按负责人聚合，可直接整段复制进群消息催办 ──
     ws_sum = workbook.add_worksheet("汇总")
-    ws_sum.merge_range(0, 0, 0, 3, "导入错误名单", title_fmt)
+    ws_sum.merge_range(0, 0, 0, 4, "导入错误名单", title_fmt)
     ws_sum.write(1, 0, f"生成时间：{generated_at}    源文件：{os.path.basename(excel_path)}", sub_fmt)
-    ws_sum.write_row(3, 0, ["负责人", "Sheet名称", "错误行数", "主要问题"], header_fmt)
+    ws_sum.write_row(3, 0, ["负责人", "Sheet名称", "错误行数", "出错行区间", "主要问题"], header_fmt)
 
     row = 4
     for (team, sheet_name), entry in summary.items():
         ws_sum.write(row, 0, team, cell_fmt)
         ws_sum.write(row, 1, sheet_name, cell_fmt)
-        ws_sum.write(row, 2, entry["count"], cell_center)
-        ws_sum.write(row, 3, "；".join(entry["problems"]), cell_wrap)
+        ws_sum.write(row, 2, _entry_count(entry), cell_center)
+        ws_sum.write(row, 3, _entry_ranges(entry), cell_wrap)
+        ws_sum.write(row, 4, "；".join(entry["problems"]), cell_wrap)
         row += 1
 
     ws_sum.write(row, 0, "合计", total_left_fmt)
     ws_sum.write(row, 1, f"{len({s for _, s in summary})} 个 Sheet", total_fmt)
-    ws_sum.write(row, 2, sum(e["count"] for e in summary.values()), total_fmt)
-    ws_sum.write(row, 3, "修正后请通知数据组补录", total_left_fmt)
+    ws_sum.write(row, 2, sum(_entry_count(e) for e in summary.values()), total_fmt)
+    ws_sum.write(row, 3, "", total_fmt)
+    ws_sum.write(row, 4, "修正后请通知数据组补录", total_left_fmt)
 
     ws_sum.set_column(0, 0, 14)
     ws_sum.set_column(1, 1, 24)
     ws_sum.set_column(2, 2, 10)
-    ws_sum.set_column(3, 3, 42)
+    ws_sum.set_column(3, 3, 40)
+    ws_sum.set_column(4, 4, 42)
 
     # ── 明细 sheet：行级错误，支持筛选 ──
     ws_det = workbook.add_worksheet("明细")

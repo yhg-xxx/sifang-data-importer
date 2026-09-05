@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QMessageBox,
 )
-from PySide6.QtCore import Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QKeySequence
 
 from app import excel_reader, local_db
@@ -72,6 +72,8 @@ class MainWindow(QMainWindow):
         self._updating_header = False  # 防止表头 checkbox 更新递归
         self._anchor_row = -1  # Shift 范围勾选的锚点行
         self._help_dlg = None  # 使用说明窗口（非模态，复用同一实例）
+        self._dir_dlg = None  # Sheet名-表映射窗口（非模态，复用同一实例）
+        self._mapping_dlg = None  # 列映射窗口（非模态，复用同一实例）
 
         self.setWindowTitle("四方数据导入工具")
         self.setMinimumSize(900, 620)
@@ -208,10 +210,22 @@ class MainWindow(QMainWindow):
         layout.addLayout(btn_layout)
 
     def _setup_status_bar(self):
+        # 左侧普通控件而非 showMessage 临时消息（两者都会被菜单悬停触发的
+        # StatusTip 临时消息顶掉），配合 eventFilter 拦截 StatusTip 事件即始终显示
         if self._connection_name:
-            self.statusBar().showMessage(f"当前连接: {self._connection_name}  |  {self._db_info}")
+            text = f"当前连接: {self._connection_name}  |  {self._db_info}"
         else:
-            self.statusBar().showMessage(f"已连接: {self._db_info}")
+            text = f"已连接: {self._db_info}"
+        label = QLabel(text)
+        label.setProperty("secondary", True)
+        self.statusBar().addWidget(label)
+        self.statusBar().installEventFilter(self)
+
+    def eventFilter(self, obj, event):
+        """吞掉状态栏的 StatusTip 事件（菜单悬停触发），防止顶掉左侧连接信息。"""
+        if obj is self.statusBar() and event.type() == QEvent.Type.StatusTip:
+            return True
+        return super().eventFilter(obj, event)
 
     def _switch_connection(self):
         """请求切换连接：关闭当前窗口，通知main.py重新走连接流程。"""
@@ -471,12 +485,22 @@ class MainWindow(QMainWindow):
                     name_item.setToolTip("")
 
     def _open_sheet_directory(self):
-        dialog = SheetDirectoryDialog(self)
-        dialog.exec()
+        """打开「Sheet名-表映射」窗口（非模态，可边看边操作）。"""
+        if self._dir_dlg is None:
+            self._dir_dlg = SheetDirectoryDialog(self)
+        self._dir_dlg.reload_data()  # 每次打开刷新（上次打开期间可能有导入更新了时间列）
+        self._dir_dlg.show()
+        self._dir_dlg.raise_()
+        self._dir_dlg.activateWindow()
 
     def _open_column_mapping(self):
-        dialog = ColumnMappingDialog(self)
-        dialog.exec()
+        """打开「列映射」窗口（非模态，可边看边操作）。"""
+        if self._mapping_dlg is None:
+            self._mapping_dlg = ColumnMappingDialog(self)
+        self._mapping_dlg.reload_data()
+        self._mapping_dlg.show()
+        self._mapping_dlg.raise_()
+        self._mapping_dlg.activateWindow()
 
     def _show_about(self):
         """打开「使用说明」帮助窗口（非模态，可边看边操作）。"""

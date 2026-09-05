@@ -25,7 +25,7 @@ FILTER_DEBOUNCE_MS = 200
 
 
 class SheetDirectoryDialog(QDialog):
-    """展示全部 Sheet 名称、对应数据库表名的模态对话框。
+    """展示全部 Sheet 名称、对应数据库表名的非模态对话框。
 
     支持：
     - 搜索框实时筛选（按 Sheet 名称模糊匹配）
@@ -48,6 +48,10 @@ class SheetDirectoryDialog(QDialog):
         self._pending_filter = ""
 
         self._setup_ui()
+        self._load_all_data()
+
+    def reload_data(self):
+        """重新从 SQLite 加载映射数据（窗口复用时每次打开前调用）。"""
         self._load_all_data()
 
     # ── UI 搭建 ──
