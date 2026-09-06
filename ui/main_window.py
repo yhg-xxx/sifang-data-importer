@@ -236,16 +236,36 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """文件读取中拦截关窗：运行中的读取线程随窗口析构会直接崩溃。
 
-        托盘模式下，正常关窗（点 ✕）不退出程序，改为隐藏到托盘。
+        托盘可用时，点 ✕ 每次弹窗询问：直接退出（默认）或最小化到托盘；
+        Esc 关掉询问框则取消本次关窗。切换连接 / 托盘退出走 _force_close，不询问。
         """
         if self._reader_worker is not None:
             toast.warning(self, "正在读取文件，请等待读取完成后再关闭")
             event.ignore()
             return
         if self._minimize_to_tray and not self._force_close:
-            event.ignore()
-            self.hide()
-            self.hidden_to_tray.emit()
+            box = QMessageBox(self)
+            box.setWindowTitle("关闭程序")
+            box.setIcon(QMessageBox.Icon.Question)
+            box.setText("要直接退出程序，还是最小化到系统托盘继续运行？")
+            btn_exit = box.addButton("直接退出", QMessageBox.ButtonRole.YesRole)
+            btn_tray = box.addButton("最小化到托盘", QMessageBox.ButtonRole.NoRole)
+            btn_cancel = box.addButton("取消", QMessageBox.ButtonRole.RejectRole)
+            box.setDefaultButton(btn_exit)    # 默认：直接退出
+            # 不显式指定时，Esc/点弹窗 ✕ 会自动触发默认按钮（=直接退出），
+            # 必须指定取消按钮兜底，让 ✕/Esc 的语义是“取消关窗”
+            box.setEscapeButton(btn_cancel)
+            box.exec()
+            clicked = box.clickedButton()
+            if clicked is btn_exit:
+                event.accept()
+                return
+            if clicked is btn_tray:
+                event.ignore()
+                self.hide()
+                self.hidden_to_tray.emit()
+                return
+            event.ignore()   # 取消（按钮 / Esc / 点弹窗 ✕）：窗口保持打开
             return
         super().closeEvent(event)
 
