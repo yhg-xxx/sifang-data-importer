@@ -32,7 +32,7 @@ class ValidateWorker(QThread):
     """后台执行验证的工作线程。"""
     progress = Signal(int, int, str)   # current, total, sheet_name
     log = Signal(str)                   # 日志行
-    finished = Signal(dict)             # 验证结果 dict
+    result_ready = Signal(dict)         # 验证结果 dict（不遮蔽 QThread.finished）
 
     def __init__(self, excel_path, selected_sheets: list = None, parent=None):
         super().__init__(parent)
@@ -43,28 +43,37 @@ class ValidateWorker(QThread):
         def _progress_callback(current, total, sheet_name):
             self.progress.emit(current, total, sheet_name)
 
-        result = validate_excel(
-            self._excel_path, self._selected_sheets,
-            _progress_callback,
-        )
-
-        if result["valid"]:
-            self.log.emit(
-                f"验证通过！共 {result['total_sheets']} 个 Sheet，"
-                f"{result['total_rows']} 行数据，未发现错误。"
+        try:
+            result = validate_excel(
+                self._excel_path, self._selected_sheets,
+                _progress_callback,
             )
-        elif result.get("error"):
-            self.log.emit(f"\n错误: {result['error']}")
-        else:
-            self.log.emit(
-                f"验证完成，发现 {result['total_errors']} 个错误"
-                f"（分布在 {len(result['errors_by_sheet'])} 个 Sheet 中）:\n"
-            )
-            for sheet_name, sheet_data in result["errors_by_sheet"].items():
-                self.log.emit(sheet_data["formatted"])
-                self.log.emit("")
 
-        self.finished.emit(result)
+            if result["valid"]:
+                self.log.emit(
+                    f"验证通过！共 {result['total_sheets']} 个 Sheet，"
+                    f"{result['total_rows']} 行数据，未发现错误。"
+                )
+            elif result.get("error"):
+                self.log.emit(f"\n错误: {result['error']}")
+            else:
+                self.log.emit(
+                    f"验证完成，发现 {result['total_errors']} 个错误"
+                    f"（分布在 {len(result['errors_by_sheet'])} 个 Sheet 中）:\n"
+                )
+                for sheet_name, sheet_data in result["errors_by_sheet"].items():
+                    self.log.emit(sheet_data["formatted"])
+                    self.log.emit("")
+        except Exception as e:
+            # 兜底：任何意外异常（文件被占用、损坏等）也必须发结果信号，
+            # 避免对话框永久卡在运行态
+            result = {
+                "valid": False, "total_errors": 0, "total_rows": 0,
+                "total_sheets": 0, "errors_by_sheet": {}, "error": str(e),
+            }
+            self.log.emit(f"验证失败: {e}")
+
+        self.result_ready.emit(result)
 
 
 class ValidateDialog(BaseTaskDialog):
@@ -120,14 +129,12 @@ class ValidateDialog(BaseTaskDialog):
         self._error_table.verticalHeader().setVisible(False)
         self._error_table.horizontalHeader().setStretchLastSection(True)
         self._error_table.verticalHeader().setDefaultSectionSize(34)
-        lay.insertWidget(3, self._error_table, 2)
+        # 先插筛选栏（索引 3），再在其后插错误表（索引 4），
+        # 保证「筛选栏在错误表上方」
+        lay.insertWidget(4, self._error_table, 2)
 
     def _run_worker(self):
-        self._worker = ValidateWorker(self._excel_path, self._selected_sheets)
-        self._worker.progress.connect(self._on_progress)
-        self._worker.log.connect(self._on_log)
-        self._worker.finished.connect(self._on_finished)
-        self._worker.start()
+        self._launch_worker(ValidateWorker(self._excel_path, self._selected_sheets))
 
     def _on_progress(self, current: int, total: int, sheet_name: str):
         super()._on_progress(current, total, sheet_name)
@@ -136,13 +143,22 @@ class ValidateDialog(BaseTaskDialog):
         )
 
     def _on_finished(self, result: dict):
-        self._finish()
-
         if result["valid"]:
+            self._result_ok = True
             self._status_label.setText("验证通过！所有数据符合约束。")
             self._status_label.setStyleSheet(f"color: {SUCCESS}; font-weight: bold;")
             self._count_label.setText("未发现错误")
             return
+
+        if result.get("error"):
+            # 整体失败（文件被占用/损坏等），不是数据错误
+            self._result_ok = False
+            self._status_label.setText("验证失败")
+            self._status_label.setStyleSheet(f"color: {DANGER}; font-weight: bold;")
+            self._count_label.setText(result["error"])
+            return
+
+        self._result_ok = True
 
         # 汇总所有 sheet 的结构化错误，按「连续行号区间」折叠成一行
         # （相邻出错的 Excel 行合并为一行，行号列显示如 90164-90166；单行长度为 1 的区间只显示单号）

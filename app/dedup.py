@@ -267,7 +267,12 @@ def run_dedup(excel_path: str, selected_sheet_names: list = None,
             except Exception:
                 pass
 
-    logger.log_dedup(result)
+    # 日志失败不能把已完成（或已诊断出错误的）去重结果误报为失败
+    # （与 run_import 对 log_import 的兜底写法一致）
+    try:
+        logger.log_dedup(result)
+    except Exception:
+        pass
     return result
 
 

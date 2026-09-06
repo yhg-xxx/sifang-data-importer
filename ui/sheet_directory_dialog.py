@@ -124,6 +124,10 @@ class SheetDirectoryDialog(QDialog):
 
         self._table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         self._table.cellChanged.connect(self._on_cell_changed)
+        # 编辑器关闭（含 Esc 取消提交）时兜底清理编辑状态：cellChanged 只在
+        # 「提交」时触发，Esc 取消后 _editing_row 会永久滞留，导致防抖筛选
+        # 静默失效、「替换全部」一直被拒
+        self._table.itemDelegate().closeEditor.connect(self._on_editor_closed)
         self._table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self._table.customContextMenuRequested.connect(self._on_context_menu)
 
@@ -250,6 +254,19 @@ class SheetDirectoryDialog(QDialog):
 
         self._table.editItem(item)
 
+    def _on_editor_closed(self, editor, hint):
+        """编辑器关闭的兜底清理（含 Esc 取消）。
+
+        延迟到事件循环下一拍：提交路径 cellChanged 在编辑器关闭流程内
+        同步触发，先于本清理执行；取消路径没有 cellChanged，由这里收尾。
+        """
+        QTimer.singleShot(0, self._cleanup_edit_state_after_close)
+
+    def _cleanup_edit_state_after_close(self):
+        if self._editing_row != -1:
+            self._reset_edit_state()
+            self._reapply_pending_filter()
+
     # ── 编辑完成（回车 / 失去焦点）──
 
     def _on_cell_changed(self, row: int, col: int):
@@ -363,6 +380,9 @@ class SheetDirectoryDialog(QDialog):
     def _on_context_menu(self, pos):
         row = self._table.rowAt(pos.y())
         if row < 0:
+            return
+        # 无有效 item 的行（如空态占位）不提供删除菜单
+        if self._table.item(row, 1) is None:
             return
 
         self._table.selectRow(row)

@@ -42,6 +42,8 @@ def _problem_text(err: dict) -> str:
         return "必填字段为空，请补填"
     if kind == "date":
         return "日期格式无法识别（应形如 2024-01-31）"
+    if kind == "length":
+        return "字段值超长，请缩短后重试"
     text = humanize_db_error(message) if message.strip() else ""
     first = next((ln for ln in text.splitlines() if ln.strip()), "未知错误")
     return first.strip()[:60]

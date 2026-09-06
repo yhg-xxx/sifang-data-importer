@@ -19,7 +19,7 @@ class DedupWorker(QThread):
 
     progress = Signal(int, int, str)   # current, total, message
     log = Signal(str)                   # 日志行
-    finished = Signal(dict)             # 去重结果 dict
+    result_ready = Signal(dict)         # 去重结果 dict（不遮蔽 QThread.finished）
 
     def __init__(self, excel_path, selected_sheet_names: list = None,
                  mode: str = "sheet", audit_col_index: int = 4, parent=None):
@@ -45,14 +45,14 @@ class DedupWorker(QThread):
                 cancel_check=lambda: self._cancelled,
             )
         except Exception as e:
-            # 兜底：任何意外异常也必须发 finished，避免对话框永久卡在运行态
+            # 兜底：任何意外异常也必须发结果信号，避免对话框永久卡在运行态
             result = {
                 "success": False, "cancelled": False, "error": str(e),
                 "sheets": [], "pending_sheets": [],
                 "output_path": "", "duplicates_csv": "",
                 "total_rows": 0, "total_deleted": 0,
             }
-        self.finished.emit(result)
+        self.result_ready.emit(result)
 
 
 class DedupDialog(BaseTaskDialog):
@@ -106,28 +106,24 @@ class DedupDialog(BaseTaskDialog):
         self.layout().insertWidget(3, self._result_table, 2)
 
     def _run_worker(self):
-        self._worker = DedupWorker(
+        self._launch_worker(DedupWorker(
             self._excel_path,
             self._selected_sheet_names,
             self._mode,
             self._audit_col_index,
-        )
-        self._worker.progress.connect(self._on_progress)
-        self._worker.log.connect(self._on_log)
-        self._worker.finished.connect(self._on_finished)
-        self._worker.start()
+        ))
 
     def _on_progress(self, current: int, total: int, message: str):
         super()._on_progress(current, total, message)
         self._log_text.append(message)
 
     def _on_finished(self, result: dict):
-        self._finish()
         self._cancel_btn.setEnabled(False)
         self._result = result
         self._fill_result_table(result)
 
         if result.get("cancelled"):
+            self._result_ok = False
             self._status_label.setText("已取消（输出文件仅包含已处理部分）")
             self._status_label.setStyleSheet(f"color: {WARNING}; font-weight: bold;")
             pending = result.get("pending_sheets") or []
@@ -135,6 +131,7 @@ class DedupDialog(BaseTaskDialog):
                 self._log_text.append("=" * 30)
                 self._log_text.append("以下 Sheet 未处理: " + "、".join(pending))
         elif result.get("success"):
+            self._result_ok = True
             deleted = result.get("total_deleted", 0)
             self._status_label.setText(f"去重完成！共删除 {deleted} 个重复行")
             self._status_label.setStyleSheet(f"color: {SUCCESS}; font-weight: bold;")
@@ -143,6 +140,7 @@ class DedupDialog(BaseTaskDialog):
             if result.get("duplicates_csv"):
                 self._log_text.append(f"重复清单: {result['duplicates_csv']}")
         else:
+            self._result_ok = False
             self._status_label.setText("去重失败")
             self._status_label.setStyleSheet(f"color: {DANGER}; font-weight: bold;")
             self._log_text.append("=" * 30)

@@ -1,8 +1,13 @@
 """数据库操作 - 连接、检查、批量导入"""
+from typing import Any
 
 import pyodbc
 
 DRIVER_NAME = "ODBC Driver 17 for SQL Server"
+
+# 查询超时（秒）：pyodbc 默认无限等待，目标表被他人锁住时
+# DELETE/INSERT 会永久阻塞且导入无取消入口
+QUERY_TIMEOUT_SECONDS = 300
 
 
 def _quote_conn_value(value: str) -> str:
@@ -21,8 +26,9 @@ def connect(server: str, database: str, username: str, password: str) -> pyodbc.
 
     通过 pyodbc 关键字参数构造连接串（user→uid、password→pwd 自动转换），
     所有值统一做花括号转义，避免特殊字符破坏连接串。
+    timeout=10 为登录超时；连接后另设查询超时（conn.timeout）。
     """
-    return pyodbc.connect(
+    conn = pyodbc.connect(
         driver=_quote_conn_value(DRIVER_NAME),
         server=_quote_conn_value(server),
         database=_quote_conn_value(database),
@@ -30,6 +36,8 @@ def connect(server: str, database: str, username: str, password: str) -> pyodbc.
         password=_quote_conn_value(password),
         timeout=10,
     )
+    conn.timeout = QUERY_TIMEOUT_SECONDS
+    return conn
 
 
 def test_connection(server: str, database: str, username: str, password: str) -> tuple[bool, str]:
@@ -56,7 +64,7 @@ def check_tables_exist(
     conn: pyodbc.Connection,
     table_names: list[str],
     schema: str = "dbo",
-) -> tuple[bool, list[str]]:
+) -> tuple[bool, list[Any]] | None:
     """检查指定表名是否全部存在于数据库中。
 
     返回 (全部存在?, 缺失的表名列表)。
@@ -81,7 +89,7 @@ def check_tables_exist(
         cursor.close()
 
 
-def count_table_rows(conn, table_name: str, schema: str = "dbo") -> int:
+def count_table_rows(conn, table_name: str, schema: str = "dbo") -> None:
     """查询表中行数（通过 SELECT COUNT(*)）。"""
     cursor = conn.cursor()
     try:
@@ -94,7 +102,7 @@ def count_table_rows(conn, table_name: str, schema: str = "dbo") -> int:
 
 def count_tables_rows_batch(
     conn, table_names: list[str], schema: str = "dbo",
-) -> dict[str, int]:
+) -> dict[Any, Any] | None:
     """批量查询多张表的行数，用 UNION ALL 合并为单次网络往返。
 
     返回 {table_name: row_count, ...}。
@@ -105,10 +113,11 @@ def count_tables_rows_batch(
     cursor = conn.cursor()
     try:
         full_names = [_full_table_name(schema, t) for t in table_names]
-        parts = [
-            f"SELECT '{t}' AS tbl, COUNT(*) AS cnt FROM {fn}"
-            for t, fn in zip(table_names, full_names)
-        ]
+        parts = []
+        for t, fn in zip(table_names, full_names):
+            # 表名进字符串字面量，单引号需按 SQL 规则加倍（表名可经映射对话框编辑）
+            literal = t.replace("'", "''")
+            parts.append(f"SELECT '{literal}' AS tbl, COUNT(*) AS cnt FROM {fn}")
         sql = " UNION ALL ".join(parts)
         cursor.execute(sql)
         return {row[0]: row[1] for row in cursor.fetchall()}

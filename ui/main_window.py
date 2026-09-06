@@ -37,7 +37,7 @@ from ui.theme import DANGER, TEXT
 
 class SheetReaderWorker(QThread):
     """后台线程：读取 Excel 全部 sheet 名称。"""
-    finished = Signal(list)
+    result_ready = Signal(list)   # 不遮蔽 QThread.finished（线程退出收尾要用）
     error = Signal(str)
 
     def __init__(self, filepath: str, parent=None):
@@ -47,7 +47,7 @@ class SheetReaderWorker(QThread):
     def run(self):
         try:
             sheets = excel_reader.read_sheets(self._filepath)
-            self.finished.emit(sheets)
+            self.result_ready.emit(sheets)
         except Exception as e:
             self.error.emit(str(e))
 
@@ -63,6 +63,9 @@ class MainWindow(QMainWindow):
         self._db_info = db_info
         self._schema = schema
         self._connection_name = connection_name
+        # 本次会话实际使用的连接参数快照：导入 worker 用它建连，
+        # 不依赖 local.db 的 is_last_used 记录（双开实例时可能被另一实例改写）
+        self._db_params = local_db.get_last_connection() or {}
         self._excel_path = ""
         self._sheets = []
         self._reader_worker = None
@@ -227,7 +230,18 @@ class MainWindow(QMainWindow):
             return True
         return super().eventFilter(obj, event)
 
+    def closeEvent(self, event):
+        """文件读取中拦截关窗：运行中的读取线程随窗口析构会直接崩溃。"""
+        if self._reader_worker is not None:
+            toast.warning(self, "正在读取文件，请等待读取完成后再关闭")
+            event.ignore()
+            return
+        super().closeEvent(event)
+
     def _switch_connection(self):
+        if self._reader_worker is not None:
+            toast.warning(self, "正在读取文件，请等待读取完成后再切换连接")
+            return
         """请求切换连接：关闭当前窗口，通知main.py重新走连接流程。"""
         try:
             if self._conn:
@@ -255,11 +269,20 @@ class MainWindow(QMainWindow):
         file_name = path.rsplit("\\", 1)[-1].rsplit("/", 1)[-1]
         self._set_loading_state(file_name)
 
-        # 后台线程读取 Excel，避免 UI 冻结
-        self._reader_worker = SheetReaderWorker(path, self)
-        self._reader_worker.finished.connect(self._on_sheets_loaded)
-        self._reader_worker.error.connect(self._on_sheets_error)
-        self._reader_worker.start()
+        # 后台线程读取 Excel，避免 UI 冻结；线程退出后清理引用并 deleteLater
+        worker = SheetReaderWorker(path)
+        worker.result_ready.connect(self._on_sheets_loaded)
+        worker.error.connect(self._on_sheets_error)
+        worker.finished.connect(self._on_reader_finished)
+        self._reader_worker = worker
+        worker.start()
+
+    def _on_reader_finished(self):
+        """读取线程真正退出：清理引用（线程存活期间据此拦截切连接/关窗）。"""
+        worker = self._reader_worker
+        self._reader_worker = None
+        if worker is not None:
+            worker.deleteLater()
 
     def _set_loading_state(self, file_name: str):
         """进入加载状态：禁用选择按钮、显示进度提示。"""
@@ -547,6 +570,25 @@ class MainWindow(QMainWindow):
             )
             return []
 
+        # 多个 Sheet 映射到同一张表时，后导入的会清掉先导入的（逐表先 DELETE），
+        # 必须提前拦截，否则用户看到「全部成功」实际只剩最后一张的数据
+        table_to_sheets = {}
+        for item in selected:
+            table_to_sheets.setdefault(item["table_name"], []).append(item["sheet_name"])
+        conflicts = {t: ss for t, ss in table_to_sheets.items() if len(ss) > 1}
+        if conflicts:
+            lines = "\n".join(
+                f"  表 {t} ← {'、'.join(ss)}" for t, ss in conflicts.items()
+            )
+            QMessageBox.warning(
+                self, "表映射冲突",
+                "以下多个 Sheet 映射到了同一张数据库表，同时导入会导致"
+                "先导入的数据被后导入的覆盖：\n"
+                f"{lines}\n"
+                "请在菜单「Sheet名-表映射」中修正后重试。"
+            )
+            return []
+
         return selected
 
     def _start_import(self):
@@ -563,11 +605,16 @@ class MainWindow(QMainWindow):
 
         # 确认对话框
         confirm = ConfirmDialog("导入", selected, self._excel_path, self)
-        if confirm.exec() != ConfirmDialog.DialogCode.Accepted:
+        confirm_result = confirm.exec()
+        confirm.deleteLater()
+        if confirm_result != ConfirmDialog.DialogCode.Accepted:
             return
 
-        dialog = ImportDialog(self._excel_path, self._schema, selected, self)
+        dialog = ImportDialog(
+            self._excel_path, self._schema, selected, self._db_params, self,
+        )
         dialog.exec()
+        dialog.deleteLater()
         self._refresh_import_states()
 
     def _start_validate(self):
@@ -584,11 +631,14 @@ class MainWindow(QMainWindow):
 
         # 确认对话框
         confirm = ConfirmDialog("验证", selected, self._excel_path, self)
-        if confirm.exec() != ConfirmDialog.DialogCode.Accepted:
+        confirm_result = confirm.exec()
+        confirm.deleteLater()
+        if confirm_result != ConfirmDialog.DialogCode.Accepted:
             return
 
         dialog = ValidateDialog(self._excel_path, selected, self)
         dialog.exec()
+        dialog.deleteLater()
 
     def _get_selected_sheet_names(self) -> list[str]:
         """收集勾选的 sheet 名称（去重只按名称处理，不涉及表映射）。"""
@@ -615,15 +665,19 @@ class MainWindow(QMainWindow):
 
         # 去重设置对话框（模式 + 判重列），摘要信息兼作去重前确认
         settings = DedupSettingsDialog(self._excel_path, len(selected_names), self)
-        if settings.exec() != DedupSettingsDialog.DialogCode.Accepted:
+        settings_result = settings.exec()
+        if settings_result != DedupSettingsDialog.DialogCode.Accepted:
+            settings.deleteLater()
             return
         options = settings.options() or {}
+        settings.deleteLater()
 
         dialog = DedupDialog(
             self._excel_path, selected_names,
             options.get("mode", "sheet"), options.get("audit_col_index", 4), self,
         )
         dialog.exec()
+        dialog.deleteLater()
 
         # 去重成功且未取消：自动切换到去重后文件，可直接点「开始导入」
         result = dialog.dedup_result
@@ -668,6 +722,7 @@ class MainWindow(QMainWindow):
         only_btn = box.addButton("只勾选失败 Sheet", QMessageBox.ButtonRole.YesRole)
         box.addButton("保持全选", QMessageBox.ButtonRole.NoRole)
         box.exec()
+        box.deleteLater()
         if box.clickedButton() is not only_btn:
             return
 

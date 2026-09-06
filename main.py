@@ -1,6 +1,7 @@
 """四方数据导入工具 - 应用入口"""
 
 import sys
+import threading
 import traceback
 
 from PySide6.QtWidgets import QApplication, QMessageBox, QWidget, QVBoxLayout, QLabel
@@ -10,23 +11,31 @@ from ui.connection_dialog import ConnectionDialog
 from ui.main_window import MainWindow
 from ui.theme import apply_theme
 
-# ── 初始化本地 SQLite 数据库 ──
-from app import local_db
-local_db.init_db()
-
 from app import database as db_module
+from app import local_db, logger
 from app.constants import ERROR_CONTACT
 
 
 def _global_excepthook(exc_type, exc_value, exc_tb):
-    """全局未捕获异常处理，弹出统一错误提示。"""
+    """全局未捕获异常处理：主线程弹统一错误提示，工作线程只落日志。
+
+    QMessageBox 只能在 GUI 线程创建；工作线程的异常若经此处弹窗，
+    属跨线程操作控件（未定义行为，可能崩溃）。
+    """
     detail = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
-    QMessageBox.critical(
-        None,
-        "程序错误",
-        f"{exc_value}\n\n{ERROR_CONTACT}",
-    )
-    print(detail, file=sys.stderr)
+    if threading.current_thread() is threading.main_thread():
+        QMessageBox.critical(
+            None,
+            "程序错误",
+            f"{exc_value}\n\n{ERROR_CONTACT}",
+        )
+    # PyInstaller windowed 模式下 sys.stderr 可能为 None
+    if sys.stderr is not None:
+        print(detail, file=sys.stderr)
+    try:
+        logger.log_uncaught(detail)
+    except Exception:
+        pass
 
 
 def _try_auto_connect_sync(last_cfg: dict | None) -> tuple | None:
@@ -98,6 +107,17 @@ def main():
     app = QApplication(sys.argv)
     app.setApplicationName("四方数据导入工具")
     apply_theme(app)
+
+    # 初始化本地 SQLite（在 main() 中执行而非模块导入期：exe 目录不可写等
+    # 失败场景下弹出可见提示后退出，避免双击 exe 无任何反应）
+    try:
+        local_db.init_db()
+    except Exception as e:
+        QMessageBox.critical(
+            None, "初始化失败",
+            f"本地数据库初始化失败：{e}\n\n{ERROR_CONTACT}",
+        )
+        return
 
     switch_requested = {"flag": False}    # 本轮主窗口是否因“连接管理”而关闭
     skip_auto_connect = {"flag": False}   # 下一轮是否跳过自动连接（刚切换完，让用户重选）

@@ -1,6 +1,7 @@
 """导入编排器 - 协调 Excel 流式读取与数据库批量写入"""
 
-from datetime import datetime
+from datetime import date, datetime
+from typing import Any
 
 from python_calamine import CalamineWorkbook
 
@@ -38,6 +39,26 @@ def _get_column_display_map() -> dict[str, str]:
             for m in local_db.get_column_mapping_with_desc()
         }
     return _COLUMN_DISPLAY_CACHE
+
+
+_LENGTH_CONSTRAINTS = None
+
+
+def _get_length_constraints() -> list[tuple[str, int]]:
+    """延迟加载并缓存字段长度约束 [(db_col, max_length), ...]。
+
+    约束定义在 validator.FIELD_CONSTRAINTS（与 DDL 一致的单一来源）；
+    validator 反向依赖本模块的 _row_to_dict，须运行时导入避免循环。
+    """
+    global _LENGTH_CONSTRAINTS
+    if _LENGTH_CONSTRAINTS is None:
+        from app.validator import FIELD_CONSTRAINTS
+        _LENGTH_CONSTRAINTS = [
+            (db_col, max_length)
+            for db_col, _is_not_null, max_length, _need_date in FIELD_CONSTRAINTS
+            if max_length is not None
+        ]
+    return _LENGTH_CONSTRAINTS
 
 
 def _display_value(value) -> str:
@@ -82,17 +103,22 @@ def _diagnose_batch(
     rows_as_dicts: list[dict],
     row_nums: list[int],
     schema: str,
-) -> list[tuple[int, dict, str]]:
+) -> list[tuple[int, dict, str]] | None:
     """逐行诊断一个批次，返回 [(Excel 行号, 行数据, 数据库报错), ...]。
 
     每次诊断使用独立的 cursor，避免批量插入失败导致 cursor 状态损坏
     从而所有的单行诊断全部报错。
+
+    诊断 cursor 必须关闭 fast_executemany：批量特有的绑定失败（None/
+    超长/混合类型的类型推断）在 fast 模式下单行插入同样会失败，会把
+    正常行误诊为数据错误。诊断成功即提交的行仍留在事务内——调用方
+    保证整表最终 rollback（诊断性重复插入不会落库）。
     """
     errors = []
     for idx, row_dict in enumerate(rows_as_dicts):
         excel_row = row_nums[idx]
         diag_cursor = conn.cursor()
-        diag_cursor.fast_executemany = True
+        diag_cursor.fast_executemany = False
         try:
             database.insert_batch(diag_cursor, table_name, [row_dict], schema)
         except Exception as e:
@@ -144,7 +170,9 @@ def _import_sheet(
     table_name: str,
     schema: str,
     progress_callback=None,
-) -> tuple[int, list[dict], list[str]]:
+) -> tuple[int | Any, list[
+    dict[str, str | list[tuple[str, str]] | dict | Any] | dict[str, str | list[tuple[str, str]] | dict | Any] | dict[
+        str, int | str | list[Any] | dict]], list[str]] | None:
     """导入单个 sheet，返回 (扫描行数, 行级错误列表, 批量级错误信息列表)。
 
     数据错误不再抛异常（由调用方汇总为失败表后继续导入下一表）；
@@ -198,21 +226,52 @@ def _import_sheet(
 
             # 日期字段(collected_at)预校验：给出清晰中文报错，
             # 避免把脏值交给数据库后报出晦涩的 22018。
+            # _to_date 已把可解析的值统一转成 date；到这里仍不是 date 的，
+            # 要么是解析失败的字符串，要么是数值格式（Excel「常规」单元格
+            # 会把日期读成 int/float 序列号），统一拦截。
             v = row_dict.get("collected_at")
-            if v is not None and isinstance(v, str) and v.strip():
-                if date_utils.parse_date(v) is None:
-                    all_errors.append({
-                        "row": excel_row,
-                        "values": row_dict,
-                        "kind": "date",
-                        "message": f"字段 [collected_at] 第 {excel_row} 行 值 '{v}' "
-                                   f"不是有效日期（应形如 2024-01-31）",
-                        "fields": [
-                            (display_map.get("collected_at", "collected_at"),
-                             _display_value(v))
-                        ],
-                    })
-                    continue
+            if v is not None and not isinstance(v, date):
+                hint = ("" if isinstance(v, str)
+                        else "（日期列应为文本格式，请勿使用数值/常规格式）")
+                all_errors.append({
+                    "row": excel_row,
+                    "values": row_dict,
+                    "kind": "date",
+                    "message": f"字段 [collected_at] 第 {excel_row} 行 "
+                               f"值 '{_display_value(v)}' "
+                               f"不是有效日期（应形如 2024-01-31）{hint}",
+                    "fields": [
+                        (display_map.get("collected_at", "collected_at"),
+                         _display_value(v))
+                    ],
+                })
+                continue
+
+            # 长度预校验：超长值若放行到数据库，会触发「批量失败 → 整批
+            # 逐行诊断」的慢路径；在预检阶段报出可以便宜一个数量级。
+            overlength = [
+                (db_col, max_length)
+                for db_col, max_length in _get_length_constraints()
+                if isinstance(row_dict.get(db_col), str)
+                and len(row_dict[db_col]) > max_length
+            ]
+            if overlength:
+                all_errors.append({
+                    "row": excel_row,
+                    "values": row_dict,
+                    "kind": "length",
+                    "message": "、".join(
+                        f"字段 [{db_col}] 值长度 {len(row_dict[db_col])} "
+                        f"超过限制 {max_length}"
+                        for db_col, max_length in overlength
+                    ),
+                    "fields": [
+                        (display_map.get(db_col, db_col),
+                         _display_value(row_dict[db_col]))
+                        for db_col, _max_length in overlength
+                    ],
+                })
+                continue
 
             clean_rows.append(row_dict)
             clean_row_nums.append(excel_row)
@@ -264,7 +323,7 @@ def _safe_rollback(conn) -> None:
         pass
 
 
-def _connection_alive(conn) -> bool:
+def _connection_alive(conn) -> bool | None:
     """检测连接是否仍然可用（SELECT 1）；用于区分表级错误与连接级错误。"""
     try:
         cur = conn.cursor()
@@ -396,7 +455,7 @@ def run_import(
     selected_sheets: list[dict],
     schema: str = "dbo",
     progress_callback=None,
-) -> dict:
+) -> None | dict[str, str | dict[Any, Any] | bool | Any] | dict:
     """执行完整导入流程。
 
     逐表独立事务：某表数据错误时仅回滚该表、记录失败并继续导入后续表，

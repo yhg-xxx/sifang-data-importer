@@ -169,7 +169,9 @@ def _seed_sheet_names(conn: sqlite3.Connection) -> None:
     if not os.path.exists(txt_path):
         return
 
-    with open(txt_path, "r", encoding="utf-8") as f:
+    # utf-8-sig 容忍 BOM：用户用记事本「带 BOM 的 UTF-8」重存后，
+    # 首个 sheet 名才不会带上 ﻿ 前缀导致映射永不匹配
+    with open(txt_path, "r", encoding="utf-8-sig") as f:
         lines = [line.strip() for line in f if line.strip()]
 
     for i, line in enumerate(lines):
@@ -323,16 +325,22 @@ def save_connection(config: dict) -> int:
         # 清除所有 is_last_used
         conn.execute("UPDATE db_connections SET is_last_used = 0")
 
+        updated = False
         if conn_id and conn_id > 0:
-            # 按 id 更新
-            conn.execute(
+            # 按 id 更新；id 已失效（如另一实例删除了该连接）时影响 0 行，
+            # 必须回退到 server+database 匹配，否则全表无 last-used，
+            # 下次启动无法自动填充连接
+            cur = conn.execute(
                 "UPDATE db_connections SET name = ?, server = ?, database = ?, "
                 "schema_name = ?, username = ?, password = ?, is_last_used = 1, "
                 "updated_at = ? WHERE id = ?",
                 (name, server, database, schema_name, username, password, now, conn_id),
             )
-            saved_id = conn_id
-        else:
+            if cur.rowcount > 0:
+                saved_id = conn_id
+                updated = True
+
+        if not updated:
             # 查找是否已有相同 server+database 的记录
             row = conn.execute(
                 "SELECT id FROM db_connections WHERE server = ? AND database = ?",

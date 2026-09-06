@@ -368,6 +368,12 @@ class ConnectionDialog(QDialog):
 
     def _start_worker(self, test_only: bool):
         """启动后台连接线程。"""
+        # 防重入：上一个连接线程还在跑时直接拒绝——覆盖 self._worker 引用
+        # 会让运行中的线程被析构（qFatal 崩溃）
+        if self._worker is not None:
+            toast.warning(self, "正在连接数据库，请等待完成")
+            return False
+
         name, server, db_name, schema, username, password = self._get_params()
         if not name:
             name = f"{server}/{db_name}" if server and db_name else ""
@@ -375,19 +381,19 @@ class ConnectionDialog(QDialog):
             toast.warning(self, "请填写服务器地址和数据库名")
             return False
 
+        # 测试/连接期间两个按钮都禁用：测试中点「连接」同样会触发重入
+        self._test_btn.setEnabled(False)
+        self._connect_btn.setEnabled(False)
         if test_only:
-            self._test_btn.setEnabled(False)
             self._test_btn.setText("测试中...")
         else:
-            self._connect_btn.setEnabled(False)
             self._connect_btn.setText("连接中...")
-            self._test_btn.setEnabled(False)
         self._pending_params = (name, server, db_name, schema, username, password)
 
         self._worker = ConnectWorker(
             server, db_name, username, password, test_only=test_only,
         )
-        self._worker.finished.connect(self._worker.deleteLater)
+        self._worker.finished.connect(self._on_worker_finished)
         self._worker.ok.connect(
             self._on_test_ok if test_only else self._on_connect_ok
         )
@@ -396,6 +402,28 @@ class ConnectionDialog(QDialog):
         )
         self._worker.start()
         return True
+
+    def _on_worker_finished(self):
+        """连接线程退出：清理引用（解除重入拦截）。"""
+        worker = self._worker
+        self._worker = None
+        if worker is not None:
+            worker.deleteLater()
+
+    def reject(self):
+        """连接进行中拦截 Esc/取消：运行中的线程随对话框析构会直接崩溃。"""
+        if self._worker is not None:
+            toast.warning(self, "正在连接数据库，请等待完成")
+            return
+        super().reject()
+
+    def closeEvent(self, event):
+        """连接进行中拦截标题栏 ✕ 关闭。"""
+        if self._worker is not None:
+            toast.warning(self, "正在连接数据库，请等待完成")
+            event.ignore()
+            return
+        super().closeEvent(event)
 
     def _test_connection(self):
         self._start_worker(test_only=True)

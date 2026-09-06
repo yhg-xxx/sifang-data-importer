@@ -156,7 +156,19 @@ def validate_excel(filepath: str, selected_sheets: list[dict],
     total_rows = 0
     errors_by_sheet = {}
 
-    wb = CalamineWorkbook.from_path(filepath)
+    try:
+        wb = CalamineWorkbook.from_path(filepath)
+    except Exception as e:
+        # 文件被占用/损坏/非 xlsx：走统一的 error 通道，不向外抛
+        return {
+            "valid": False,
+            "total_errors": 0,
+            "total_rows": 0,
+            "total_sheets": len(selected_sheets),
+            "errors_by_sheet": {},
+            "error": f"无法打开 Excel 文件：{e}",
+        }
+
     try:
         for i, item in enumerate(selected_sheets):
             sheet_name = item["sheet_name"]

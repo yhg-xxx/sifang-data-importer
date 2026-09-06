@@ -3,6 +3,12 @@
 import os
 import sys
 
+try:
+    import msvcrt
+    _HAS_MSVCRT = True
+except ImportError:  # 非 Windows 平台无文件锁
+    _HAS_MSVCRT = False
+
 LOG_FILE_NAME = "import_log.txt"
 MAX_LOG_SIZE = 1 * 1024 * 1024  # 超过 1MB 轮转归档
 
@@ -33,32 +39,37 @@ def _rotate_if_needed(log_path: str) -> None:
 
 
 def _append_text(log_path: str, text: str) -> None:
-    """追加写入日志；Windows 下对文件头加锁，尽力避免多实例交错写入。"""
-    try:
-        import msvcrt
-    except ImportError:
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(text)
-        return
+    """追加写入日志；Windows 下对文件头加锁，尽力避免多实例交错写入。
 
-    with open(log_path, "a", encoding="utf-8") as f:
-        locked = False
-        try:
-            f.seek(0)
-            msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
-            locked = True
-        except OSError:
-            pass  # 文件为空或锁失败：尽力而为
-        try:
-            f.write(text)
-            f.flush()
-        finally:
-            if locked:
-                try:
-                    f.seek(0)
-                    msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
-                except OSError:
-                    pass
+    日志写入永远不向上抛异常：文件被占用、目录只读、磁盘满等失败
+    一律静默跳过——日志问题不能破坏导入/去重的结果上报。
+    """
+    try:
+        if not _HAS_MSVCRT:
+            with open(log_path, "a", encoding="utf-8") as f:
+                f.write(text)
+            return
+
+        with open(log_path, "a", encoding="utf-8") as f:
+            locked = False
+            try:
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_LOCK, 1)
+                locked = True
+            except OSError:
+                pass  # 文件为空或锁失败：尽力而为
+            try:
+                f.write(text)
+                f.flush()
+            finally:
+                if locked:
+                    try:
+                        f.seek(0)
+                        msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+                    except OSError:
+                        pass
+    except OSError:
+        pass
 
 
 def log_import(result: dict) -> None:
@@ -96,11 +107,16 @@ def log_import(result: dict) -> None:
     lines.append("详情:")
     for table_name, row_count in tables.items():
         lines.append(f"  {table_name}: {row_count} 行")
+    if tables:
+        lines.append(f"  合计: {len(tables)} 张表，共 {sum(tables.values())} 行")
     for table_name, info in failed.items():
         sheet_name = info.get("sheet_name", "")
         lines.append(f"  {table_name} [{sheet_name}]: 导入失败")
         for ln in (info.get("error") or "").splitlines():
             lines.append(f"    {ln}")
+    error_rows = sum(len(info.get("errors") or []) for info in failed.values())
+    if error_rows:
+        lines.append(f"  错误行合计: {error_rows} 行（{len(failed)} 张失败表）")
 
     lines.append("")
 
@@ -163,3 +179,11 @@ def log_dedup(result: dict) -> None:
     log_path = _get_log_path()
     _rotate_if_needed(log_path)
     _append_text(log_path, "\n".join(lines))
+
+
+def log_uncaught(detail: str) -> None:
+    """记录未捕获异常文本（供全局 excepthook 兜底：无控制台的 windowed
+    exe 与工作线程场景下，异常至少在日志中留痕）。"""
+    log_path = _get_log_path()
+    _rotate_if_needed(log_path)
+    _append_text(log_path, f"[未捕获异常]\n{detail}\n\n")
