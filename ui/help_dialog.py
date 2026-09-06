@@ -30,7 +30,7 @@ class HelpDialog(QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("使用说明 - 四方数据导入工具")
+        self.setWindowTitle("使用说明 - 四方信息源入库")
         self.resize(880, 620)
         self.setMinimumSize(700, 460)
 

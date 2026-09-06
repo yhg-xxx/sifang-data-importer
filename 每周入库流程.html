@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>四方数据周度入库流程</title>
+<title>四方数据周度入库流程 · 前后对比</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Noto+Sans+SC:wght@400;500;700&family=ZCOOL+QingKe+HuangYou&display=swap">
 <style>
   :root{
@@ -38,7 +38,7 @@
     font:400 15px/1.75 "Noto Sans SC","Microsoft YaHei",sans-serif;
     -webkit-font-smoothing:antialiased;
   }
-  .page{max-width:980px; margin:0 auto; padding:44px 20px 60px}
+  .page{max-width:1860px; margin:0 auto; padding:44px 20px 60px}
 
   .eyebrow{
     margin:0 0 10px; font-size:12px; font-weight:600; letter-spacing:.22em;
@@ -73,6 +73,19 @@
   figcaption{
     padding:10px 8px 2px; font-size:12px; color:var(--muted); text-align:center;
   }
+
+  .compare{display:grid; grid-template-columns:1fr 1fr; gap:16px; align-items:start; margin:0 0 34px}
+  .compare .flow-fig{margin:0}
+  .compare .fig-scroll svg{min-width:520px}
+  @media (max-width:900px){.compare{grid-template-columns:1fr}}
+  .fig-head{display:flex; align-items:baseline; gap:10px; padding:2px 10px 12px}
+  .panel-tag{
+    font:600 12.5px "Noto Sans SC",sans-serif; letter-spacing:.06em;
+    border:1px solid; border-radius:999px; padding:3px 13px;
+  }
+  .tag-old{color:var(--err); border-color:var(--err); background:var(--err-soft)}
+  .tag-new{color:var(--ok); border-color:var(--ok); background:var(--ok-soft)}
+  .panel-sub{font-size:12px; color:var(--muted)}
 
   h2{
     font-family:"ZCOOL QingKe HuangYou","Noto Sans SC",sans-serif; font-weight:400;
@@ -115,6 +128,8 @@
   .edge-ok{stroke:var(--ok); stroke-width:1.6; fill:none}
   .edge-err{stroke:var(--err); stroke-width:1.6; fill:none}
   .edge-cycle{stroke:var(--line-strong); stroke-width:1.6; fill:none; stroke-dasharray:7 6; opacity:.9}
+  .loop-err{stroke:var(--err); stroke-width:1.6; fill:none; stroke-dasharray:7 6; opacity:.9}
+  .cyc-err{fill:var(--err)}
   .mk{fill:var(--muted)} .mk-ok{fill:var(--ok)} .mk-err{fill:var(--err)}
 
   .ph-line{stroke:var(--line-strong); stroke-width:1.4; stroke-dasharray:1 7; stroke-linecap:round}
@@ -157,14 +172,15 @@
 <div class="page">
 
   <header>
-    <p class="eyebrow">四方数据导入工具 · 周例行动作</p>
-    <h1>每周入库流程<span class="cyc-dot">↻</span></h1>
-    <p class="lead">每周一轮：上午十点关闭上一周的收集表，内置全局去重后一次性全选导入——失败的表自动跳过并生成错误名单发回业务修正；定稿重命名后一键补录出错的 Sheet，数据库回到全量最新。</p>
+    <p class="eyebrow">四方信息源入库 · 周例行动作</p>
+    <h1>每周入库流程 · 前后对比<span class="cyc-dot">↻</span></h1>
+    <p class="lead">同一轮周例行，两个版本：左边是优化前——外部去重、导入两个工具来回切换，遇坏表整轮中止、反复重导，错误与去重情况全靠人工整理；右边是现在——两个工具融合为一，失败表自动跳过，错误名单、重复清单直出，定稿后一键补录收尾。</p>
     <ul class="meta">
       <li><b>周期</b>每周一轮</li>
       <li><b>本轮</b>2026-09-05</li>
       <li><b>收集截止</b>上午 10:00</li>
       <li><b>参与</b>数据组 × 业务人员</li>
+      <li><b>工具</b>2 个 → 1 个</li>
     </ul>
   </header>
 
@@ -177,10 +193,170 @@
     <li><svg width="16" height="13" viewBox="0 0 16 13"><ellipse cx="8" cy="6.5" rx="6.5" ry="4.5" fill="var(--ok-soft)" stroke="var(--ok)" stroke-width="1.3"/></svg>SQL Server</li>
   </ul>
 
+  <section class="compare" aria-label="优化前后流程对比">
   <figure class="flow-fig">
     <div class="fig-card">
+      <div class="fig-head"><span class="panel-tag tag-old">优化前 · 两个工具</span><span class="panel-sub">2026-08 及以前</span></div>
       <div class="fig-scroll">
-      <svg viewBox="0 0 900 1450" role="img" aria-label="四方数据每周入库流程图：上午九点群内预告，十点关闭金山共享表并下载 Excel；四方数据导入工具内置全局去重，输出带时间戳的去重文件；四方数据导入工具首次导入，失败的表自动跳过并继续下一表，结束自动生成错误名单 xlsx；转回共享表连同错误名单发业务人员修正；修正完成后重命名为数据源9.5_已去重 定稿，导出 Excel 后一键只勾选出错的 Sheet 补录；本周完成，每周循环一轮。">
+      <svg viewBox="0 0 900 1600" role="img" aria-label="优化前的每周入库流程：上午十点关闭金山共享表下载 Excel；外部去重工具单独去重、无重复对照清单；切换到导入工具先验证再导入，遇第一个坏表整轮中止，取消勾选重导、反复多次；人工抄录错误发业务修正；重新下载后全量重导、失败表靠人工记住；人工核对四十六表齐全后完成。">
+        <defs>
+          <marker id="am-l" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="9" markerHeight="7" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0,0 L10,4 L0,8 Z" class="mk"/></marker>
+          <marker id="ar-l" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="9" markerHeight="7" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0,0 L10,4 L0,8 Z" class="mk-err"/></marker>
+        </defs>
+
+        <!-- 重导循环弧（坏表中止 → 取消勾选 → 重导） -->
+        <path class="loop-err" d="M 600 910 C 872 910 872 716 608 716" marker-end="url(#ar-l)"/>
+        <text class="cyc-t cyc-err" transform="rotate(-90 850 813)" x="850" y="813" text-anchor="middle">重导循环 · 坏一个中止一次</text>
+        <text class="cyc-t cyc-err" transform="rotate(-90 868 813)" x="868" y="813" text-anchor="middle">8.22 深夜曾连试 7 次</text>
+
+        <!-- 阶段分隔线 -->
+        <g>
+          <line class="ph-line" x1="60" y1="30"  x2="745" y2="30"/>
+          <line class="ph-line" x1="60" y1="286" x2="745" y2="286"/>
+          <line class="ph-line" x1="60" y1="534" x2="745" y2="534"/>
+          <line class="ph-line" x1="60" y1="990" x2="745" y2="990"/>
+          <line class="ph-line" x1="60" y1="1366" x2="745" y2="1366"/>
+          <rect class="ph-chip" x="60" y="17"  width="104" height="26" rx="13"/><text class="ph-t" x="74" y="34"><tspan class="ph-num">①</tspan> 收集截止</text>
+          <rect class="ph-chip" x="60" y="273" width="96"  height="26" rx="13"/><text class="ph-t" x="74" y="290"><tspan class="ph-num">②</tspan> 外部去重</text>
+          <rect class="ph-chip" x="60" y="521" width="110" height="26" rx="13"/><text class="ph-t" x="74" y="538"><tspan class="ph-num">③</tspan> 验证＋导入</text>
+          <rect class="ph-chip" x="60" y="977" width="96"  height="26" rx="13"/><text class="ph-t" x="74" y="994"><tspan class="ph-num">④</tspan> 人工返修</text>
+          <rect class="ph-chip" x="60" y="1353" width="96" height="26" rx="13"/><text class="ph-t" x="74" y="1370"><tspan class="ph-num">⑤</tspan> 人工收尾</text>
+        </g>
+
+        <!-- 连线 -->
+        <g>
+          <path class="edge" d="M 430 128 V 170" marker-end="url(#am-l)"/>
+          <path class="edge" d="M 430 242 V 320" marker-end="url(#am-l)"/>
+          <path class="edge" d="M 430 390 V 430" marker-end="url(#am-l)"/>
+          <path class="edge" d="M 430 500 V 568" marker-end="url(#am-l)"/>
+          <path class="edge" d="M 430 638 V 668" marker-end="url(#am-l)"/>
+          <path class="edge-err" d="M 430 742 V 772" marker-end="url(#ar-l)"/><text class="lbl lbl-err" x="440" y="762">首个坏表</text>
+          <path class="edge" d="M 430 842 V 872" marker-end="url(#am-l)"/>
+          <path class="edge" d="M 430 942 V 1024" marker-end="url(#am-l)"/>
+          <path class="edge" d="M 430 1094 V 1140" marker-end="url(#am-l)"/><text class="lbl" x="440" y="1124">待修正</text>
+          <path class="edge" d="M 430 1210 V 1256" marker-end="url(#am-l)"/><text class="lbl" x="440" y="1240">修正完成</text>
+          <path class="edge" d="M 430 1326 V 1400" marker-end="url(#am-l)"/>
+          <path class="edge" d="M 430 1470 V 1500" marker-end="url(#am-l)"/>
+
+          <path class="edge" d="M 600 210 H 642" marker-end="url(#am-l)"/><text class="lbl" x="606" y="202">下载</text>
+          <path class="edge" d="M 600 358 H 642" marker-end="url(#am-l)"/><text class="lbl" x="606" y="350">输出</text>
+
+          <path class="edge" d="M 240 708 H 140 V 806" marker-end="url(#am-l)"/><text class="lbl" x="150" y="699">中止前已入库</text>
+        </g>
+
+        <!-- 数据库（左列） -->
+        <g>
+          <path class="db-body" d="M 45 825 V 950 A 95 13 0 0 0 235 950 V 825"/>
+          <ellipse class="db-body" cx="140" cy="825" rx="95" ry="13"/>
+          <text class="db-t"  x="140" y="858" text-anchor="middle">SQL Server</text>
+          <text class="db-s"  x="140" y="880" text-anchor="middle">enterprise_info_001–046</text>
+          <text class="db-s2" x="140" y="904" text-anchor="middle">46 张表 · 先删后插</text>
+          <text class="db-s2" x="140" y="922" text-anchor="middle">断点与遗漏靠人工记住</text>
+        </g>
+
+        <!-- 节点 -->
+        <g>
+          <!-- ① -->
+          <rect class="n-act" x="240" y="64" width="360" height="64" rx="10"/>
+          <rect class="badge-r" x="254" y="76" width="46" height="20" rx="5"/>
+          <text class="badge-t" x="277" y="90" text-anchor="middle">09:00</text>
+          <text class="tt"  x="314" y="90">群内预告</text>
+          <text class="sub" x="256" y="112">10:00 将关闭「数据源8.28」金山共享表</text>
+
+          <rect class="n-act" x="240" y="178" width="360" height="64" rx="10"/>
+          <rect class="badge-r" x="254" y="190" width="46" height="20" rx="5"/>
+          <text class="badge-t" x="277" y="204" text-anchor="middle">10:00</text>
+          <text class="tt"  x="314" y="204">关闭共享表，下载 Excel</text>
+          <text class="sub" x="256" y="226">金山文档停止收集，导出为本地 xlsx</text>
+
+          <!-- ② -->
+          <rect class="n-tool" x="240" y="326" width="360" height="64" rx="10"/>
+          <rect class="chip-tool" x="254" y="338" width="40" height="20" rx="5"/>
+          <text class="chip-t" x="274" y="352" text-anchor="middle" fill="var(--accent-soft)">工</text>
+          <text class="tt"  x="306" y="352">外部去重工具 · 去重</text>
+          <text class="sub" x="256" y="374">独立程序，跑完再打开导入工具</text>
+
+          <rect class="n-act" x="240" y="436" width="360" height="64" rx="10"/>
+          <text class="tt"  x="256" y="460">切换到导入工具，重选文件</text>
+          <text class="sub" x="256" y="482">两个工具互不相通，文件来回倒手</text>
+
+          <!-- ③ -->
+          <rect class="n-tool" x="240" y="574" width="360" height="64" rx="10"/>
+          <rect class="chip-tool" x="254" y="586" width="40" height="20" rx="5"/>
+          <text class="chip-t" x="274" y="600" text-anchor="middle" fill="var(--accent-soft)">工</text>
+          <text class="tt"  x="306" y="600">导入工具 · 验证数据</text>
+          <text class="sub" x="256" y="622">约束先离线查一遍，导入时还要再查一遍</text>
+
+          <rect class="n-tool" x="240" y="674" width="360" height="68" rx="10"/>
+          <rect class="chip-tool" x="254" y="686" width="40" height="20" rx="5"/>
+          <text class="chip-t" x="274" y="700" text-anchor="middle" fill="var(--accent-soft)">工</text>
+          <text class="tt"  x="306" y="700">导入工具 · 开始导入</text>
+          <text class="sub" x="256" y="724">遇第一个坏表：该轮即刻中止</text>
+
+          <rect class="n-err" x="240" y="778" width="360" height="64" rx="10"/>
+          <text class="tt"  x="256" y="802">整轮中止 · 弹窗报错</text>
+          <text class="sub" x="256" y="824">坏表之后的 Sheet 全部未导</text>
+
+          <rect class="n-act" x="240" y="878" width="360" height="64" rx="10"/>
+          <text class="tt"  x="256" y="902">取消勾选坏表，重新导入</text>
+          <text class="sub" x="256" y="924">下一个坏表再次中止，如此往复</text>
+
+          <!-- ④ -->
+          <rect class="n-act" x="240" y="1030" width="360" height="64" rx="10"/>
+          <text class="tt"  x="256" y="1054">人工整理错误 · 发群催办</text>
+          <text class="sub" x="256" y="1076">从弹窗与日志逐条抄录，无汇总名单</text>
+
+          <rect class="n-ext" x="240" y="1146" width="360" height="64" rx="10"/>
+          <rect class="chip-ext" x="254" y="1158" width="58" height="20" rx="5"/>
+          <text class="chip-t" x="283" y="1172" text-anchor="middle" fill="var(--warn-soft)">业务人员</text>
+          <text class="tt"  x="324" y="1172">修正错误数据</text>
+          <text class="sub" x="256" y="1194">按群内指认的位置修改，时间视回复而定</text>
+
+          <rect class="n-act" x="240" y="1262" width="360" height="64" rx="10"/>
+          <text class="tt"  x="256" y="1286">重新下载，全量重导</text>
+          <text class="sub" x="256" y="1308">失败表无记忆——凭人记住勾选；漏勾的表在库内隐性过期</text>
+
+          <!-- ⑤ -->
+          <rect class="n-act" x="240" y="1406" width="360" height="64" rx="10"/>
+          <text class="tt"  x="256" y="1430">人工核对 46 表是否齐全</text>
+          <text class="sub" x="256" y="1452">逐表对照最后导入时间与行数</text>
+
+          <rect class="n-done" x="240" y="1506" width="360" height="56" rx="10"/>
+          <circle class="check-c" cx="272" cy="1525" r="9"/>
+          <path class="check" d="M 267.5 1525 l 3 3 l 6 -6.5"/>
+          <text class="tt"  x="290" y="1530">本周入库完成</text>
+          <text class="sub" x="256" y="1550">全程人工确认 · 无名单留痕</text>
+        </g>
+
+        <!-- 右列：产物与缺失 -->
+        <g>
+          <rect class="pill" x="648" y="193" width="140" height="34" rx="17"/>
+          <path class="ficon" d="M 662 202 h 8 l 4 4 v 10 h -12 z M 670 202 v 4 h 4"/>
+          <text class="pill-t" x="682" y="214">数据源8.28.xlsx</text>
+
+          <rect class="pill" x="648" y="341" width="170" height="34" rx="17"/>
+          <path class="ficon" d="M 662 350 h 8 l 4 4 v 10 h -12 z M 670 350 v 4 h 4"/>
+          <text class="pill-t" x="682" y="362">数据源8.28_已去重.xlsx</text>
+
+          <rect class="n-err" x="648" y="392" width="226" height="52" rx="10"/>
+          <text class="tt"  x="664" y="414">无重复对照清单</text>
+          <text class="sub" x="664" y="432">删除情况无据可查 · 偶发残留重复</text>
+
+          <rect class="n-err" x="648" y="1146" width="226" height="52" rx="10"/>
+          <text class="tt"  x="664" y="1168">无自动错误名单</text>
+          <text class="sub" x="664" y="1186">截图＋群消息逐条传达</text>
+        </g>
+      </svg>
+      </div>
+    </div>
+    <figcaption>红线＝坏表整轮中止 · 红色虚线弧＝「取消勾选→重导」循环；右列为各阶段产物——去重无对照清单、错误无自动名单。</figcaption>
+  </figure>
+
+  <figure class="flow-fig">
+    <div class="fig-card">
+      <div class="fig-head"><span class="panel-tag tag-new">现在 · 融合为一个工具</span><span class="panel-sub">2026-09 起</span></div>
+      <div class="fig-scroll">
+      <svg viewBox="0 0 900 1450" role="img" aria-label="四方数据每周入库流程图：上午九点群内预告，十点关闭金山共享表并下载 Excel；四方信息源入库内置全局去重，输出带时间戳的去重文件；四方信息源入库首次导入，失败的表自动跳过并继续下一表，结束自动生成错误名单 xlsx；转回共享表连同错误名单发业务人员修正；修正完成后重命名为数据源9.5_已去重 定稿，导出 Excel 后一键只勾选出错的 Sheet 补录；本周完成，每周循环一轮。">
         <defs>
           <marker id="am" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="9" markerHeight="7" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0,0 L10,4 L0,8 Z" class="mk"/></marker>
           <marker id="ag" viewBox="0 0 10 8" refX="9" refY="4" markerWidth="9" markerHeight="7" orient="auto-start-reverse" markerUnits="userSpaceOnUse"><path d="M0,0 L10,4 L0,8 Z" class="mk-ok"/></marker>
@@ -199,7 +375,7 @@
           <line class="ph-line" x1="60" y1="700" x2="745" y2="700"/>
           <line class="ph-line" x1="60" y1="1190" x2="745" y2="1190"/>
           <rect class="ph-chip" x="60" y="17"  width="104" height="26" rx="13"/><text class="ph-t" x="74" y="34"><tspan class="ph-num">①</tspan> 收集截止</text>
-          <rect class="ph-chip" x="60" y="273" width="72"  height="26" rx="13"/><text class="ph-t" x="74" y="290"><tspan class="ph-num">②</tspan> 去重</text>
+          <rect class="ph-chip" x="60" y="273" width="104" height="26" rx="13"/><text class="ph-t" x="74" y="290"><tspan class="ph-num">②</tspan> 内置去重</text>
           <rect class="ph-chip" x="60" y="421" width="96"  height="26" rx="13"/><text class="ph-t" x="74" y="438"><tspan class="ph-num">③</tspan> 首次导入</text>
           <rect class="ph-chip" x="60" y="687" width="96"  height="26" rx="13"/><text class="ph-t" x="74" y="704"><tspan class="ph-num">④</tspan> 业务返修</text>
           <rect class="ph-chip" x="60" y="1177" width="96" height="26" rx="13"/><text class="ph-t" x="74" y="1194"><tspan class="ph-num">⑤</tspan> 补录收尾</text>
@@ -219,6 +395,7 @@
 
           <path class="edge" d="M 600 210 H 642" marker-end="url(#am)"/><text class="lbl" x="606" y="202">下载</text>
           <path class="edge" d="M 600 358 H 642" marker-end="url(#am)"/><text class="lbl" x="606" y="350">输出</text>
+          <path class="edge" d="M 600 378 H 626 V 409 H 642" marker-end="url(#am)"/>
           <path class="edge" d="M 600 1114 H 642" marker-end="url(#am)"/><text class="lbl" x="606" y="1106">导出</text>
 
           <path class="edge-ok" d="M 240 508 H 140 V 806" marker-end="url(#ag)"/><text class="lbl lbl-ok" x="146" y="499">成功表入库</text>
@@ -257,14 +434,14 @@
           <rect class="n-tool" x="240" y="326" width="360" height="64" rx="10"/>
           <rect class="chip-tool" x="254" y="338" width="40" height="20" rx="5"/>
           <text class="chip-t" x="274" y="352" text-anchor="middle" fill="var(--accent-soft)">工</text>
-          <text class="tt"  x="306" y="352">四方数据导入工具 · 数据去重</text>
+          <text class="tt"  x="306" y="352">四方信息源入库 · 数据去重</text>
           <text class="sub" x="256" y="374">全局去重，判重列 D 企业名称；输出不叠加后缀</text>
 
           <!-- ③ -->
           <rect class="n-tool" x="240" y="474" width="360" height="68" rx="10"/>
           <rect class="chip-tool" x="254" y="486" width="40" height="20" rx="5"/>
           <text class="chip-t" x="274" y="500" text-anchor="middle" fill="var(--accent-soft)">工</text>
-          <text class="tt"  x="306" y="500">四方数据导入工具 · 首次导入</text>
+          <text class="tt"  x="306" y="500">四方信息源入库 · 首次导入</text>
           <text class="sub" x="256" y="524">全选一次性导入；失败表自动跳过并继续 <tspan class="mark">①</tspan></text>
 
           <!-- 错误名单（右列） -->
@@ -316,6 +493,10 @@
           <path class="ficon" d="M 662 350 h 8 l 4 4 v 10 h -12 z M 670 350 v 4 h 4"/>
           <text class="pill-t" x="682" y="362">数据源8.28_已去重_时间戳.xlsx</text>
 
+          <rect class="pill" x="648" y="392" width="132" height="34" rx="17"/>
+          <path class="ficon" d="M 662 401 h 8 l 4 4 v 10 h -12 z M 670 401 v 4 h 4"/>
+          <text class="pill-t" x="682" y="413">重复清单.csv</text>
+
           <rect class="pill" x="648" y="1097" width="168" height="34" rx="17"/>
           <path class="ficon" d="M 662 1106 h 8 l 4 4 v 10 h -12 z M 670 1106 v 4 h 4"/>
           <text class="pill-t" x="682" y="1118">数据源9.5_已去重.xlsx</text>
@@ -323,8 +504,9 @@
       </svg>
       </div>
     </div>
-    <figcaption>绿线＝入库路径 · 红线＝错误返修路径 · 右侧虚线弧＝周循环；左列为数据库，右列为各阶段文件产物。</figcaption>
+    <figcaption>绿线＝入库路径 · 红线＝错误返修路径 · 右侧虚线弧＝周循环；左列为数据库，右列为各阶段文件产物（含重复清单）。</figcaption>
   </figure>
+  </section>
 
   <section aria-labelledby="lin-h">
     <h2 id="lin-h">文件名流转</h2>
@@ -362,7 +544,7 @@
     </ol>
   </section>
 
-  <footer>记录于 2026-09-05 · 本轮：数据源8.28_已去重（收集） → 数据源9.5_已去重（定稿）</footer>
+  <footer>更新于 2026-09-06 · 左＝优化前（双工具时代） · 右＝现流程 · 本轮：数据源8.28（收集） → 数据源9.5_已去重（定稿）</footer>
 </div>
 </body>
 </html>

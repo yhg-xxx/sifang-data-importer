@@ -1,4 +1,4 @@
-"""四方数据导入工具 - 应用入口"""
+"""四方信息源入库 - 应用入口"""
 
 import sys
 import threading
@@ -10,6 +10,7 @@ from PySide6.QtCore import QThread, Signal, QEventLoop
 from ui.connection_dialog import ConnectionDialog
 from ui.main_window import MainWindow
 from ui.theme import apply_theme
+from ui.tray import TrayController
 
 from app import database as db_module
 from app import local_db, logger
@@ -77,7 +78,7 @@ def _try_auto_connect_async(app: QApplication) -> tuple | None:
         return None
 
     overlay = QWidget()
-    overlay.setWindowTitle("四方数据导入工具")
+    overlay.setWindowTitle("四方信息源入库")
     overlay_layout = QVBoxLayout(overlay)
     overlay_layout.addWidget(QLabel("正在自动连接上次使用的数据库…"))
     overlay.setFixedSize(340, 90)
@@ -101,12 +102,36 @@ def _try_auto_connect_async(app: QApplication) -> tuple | None:
     return result_box.get("result")
 
 
+def _set_app_user_model_id():
+    """给进程设置显式 AppUserModelID。
+
+    不设置时 Windows 按 python.exe / PyInstaller 引导器的归属分组任务栏按钮，
+    图标和名称都落在解释器默认值上；设置后任务栏按本程序自己的图标显示。
+    """
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(
+                "sifang.info-import"
+            )
+        except Exception:
+            pass
+
+
 def main():
     sys.excepthook = _global_excepthook
+    _set_app_user_model_id()
 
     app = QApplication(sys.argv)
-    app.setApplicationName("四方数据导入工具")
+    app.setApplicationName("四方信息源入库")
     apply_theme(app)
+
+    # 系统托盘：不可用时（极少见）退化为原有行为——关窗即退出
+    tray = TrayController()
+    tray_available = TrayController.is_available()
+    if tray_available:
+        app.setWindowIcon(tray.icon)   # 顺带给窗口/任务栏同一图标
+
 
     # 初始化本地 SQLite（在 main() 中执行而非模块导入期：exe 目录不可写等
     # 失败场景下弹出可见提示后退出，避免双击 exe 无任何反应）
@@ -124,13 +149,52 @@ def main():
 
     def run_main_window(conn, db_info, schema, conn_name):
         window = MainWindow(conn, db_info, schema, connection_name=conn_name)
+        window._minimize_to_tray = tray_available
+        window.setWindowIcon(tray.icon)   # 显式设到窗口，确保任务栏/标题栏生效
 
         def _on_switch():
             switch_requested["flag"] = True
 
         window.connection_switch_requested.connect(_on_switch)
+
+        def _restore_window():
+            window.showNormal()
+            window.raise_()
+            window.activateWindow()
+
+        def _quit_from_tray():
+            modal = app.activeModalWidget()
+            if modal is not None:
+                # 导入/去重/验证等任务对话框打开中：强杀会中断任务，拒绝退出
+                modal.raise_()
+                modal.activateWindow()
+                tray.notify_busy()
+                return
+            if window._reader_worker is not None:
+                # 正在后台读文件：恢复窗口后走 closeEvent 的既有拦截提示
+                _restore_window()
+                window.close()
+                return
+            tray.hide()   # 先撤图标再退出，避免退出后托盘残留
+            window._force_close = True
+            window.close()
+            app.quit()
+
+        window.hidden_to_tray.connect(tray.notify_hidden_to_tray)
+        tray.show_requested.connect(_restore_window)
+        tray.quit_requested.connect(_quit_from_tray)
+
+        if tray_available:
+            tray.show()
         window.show()
         app.exec()
+
+        # 解除托盘与旧窗口的绑定：处理闭包引用着旧 window，
+        # 不解开会拖住已关闭的窗口（下次 show_requested 会唤出僵尸窗口）
+        tray.show_requested.disconnect(_restore_window)
+        tray.quit_requested.disconnect(_quit_from_tray)
+        window.hidden_to_tray.disconnect(tray.notify_hidden_to_tray)
+        tray.hide()
         window.close()
 
     while True:

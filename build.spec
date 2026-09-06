@@ -1,5 +1,5 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""PyInstaller 打包配置 - 四方数据导入工具"""
+"""PyInstaller 打包配置 - 四方信息源入库"""
 
 block_cipher = None
 
@@ -9,6 +9,7 @@ a = Analysis(
     binaries=[],
     datas=[
         ('sheet_names.txt', '.'),
+        ('assets/icon.png', 'assets'),   # 托盘/窗口图标（运行时加载，缺失则兜底画「四」字）
     ],
     hiddenimports=[
         'PySide6',
@@ -37,6 +38,7 @@ a = Analysis(
         'ui.main_window',
         'ui.sheet_directory_dialog',
         'ui.theme',
+        'ui.tray',
         'ui.validate_dialog',
     ],
     hookspath=[],
@@ -58,7 +60,8 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='四方数据导入工具',
+    name='四方信息源入库',
+    icon='assets/icon.ico',   # exe 文件图标（圆角处理后的多尺寸 ico）
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,

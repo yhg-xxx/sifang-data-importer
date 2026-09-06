@@ -56,6 +56,7 @@ class MainWindow(QMainWindow):
     """用户成功连接数据库后显示的主窗口。"""
 
     connection_switch_requested = Signal()
+    hidden_to_tray = Signal()   # 关窗被改为隐藏到托盘时发出（托盘据此气泡提示）
 
     def __init__(self, conn, db_info: str, schema: str = "dbo", connection_name: str = "", parent=None):
         super().__init__(parent)
@@ -74,11 +75,13 @@ class MainWindow(QMainWindow):
         self._loading_file_name = ""
         self._updating_header = False  # 防止表头 checkbox 更新递归
         self._anchor_row = -1  # Shift 范围勾选的锚点行
+        self._minimize_to_tray = False  # 托盘可用时由 main.py 置 True：关窗改为隐藏到托盘
+        self._force_close = False       # 切换连接 / 托盘退出时置 True：绕过隐藏逻辑真正关窗
         self._help_dlg = None  # 使用说明窗口（非模态，复用同一实例）
         self._dir_dlg = None  # Sheet名-表映射窗口（非模态，复用同一实例）
         self._mapping_dlg = None  # 列映射窗口（非模态，复用同一实例）
 
-        self.setWindowTitle("四方数据导入工具")
+        self.setWindowTitle("四方信息源入库")
         self.setMinimumSize(900, 620)
 
         self._setup_ui()
@@ -231,10 +234,18 @@ class MainWindow(QMainWindow):
         return super().eventFilter(obj, event)
 
     def closeEvent(self, event):
-        """文件读取中拦截关窗：运行中的读取线程随窗口析构会直接崩溃。"""
+        """文件读取中拦截关窗：运行中的读取线程随窗口析构会直接崩溃。
+
+        托盘模式下，正常关窗（点 ✕）不退出程序，改为隐藏到托盘。
+        """
         if self._reader_worker is not None:
             toast.warning(self, "正在读取文件，请等待读取完成后再关闭")
             event.ignore()
+            return
+        if self._minimize_to_tray and not self._force_close:
+            event.ignore()
+            self.hide()
+            self.hidden_to_tray.emit()
             return
         super().closeEvent(event)
 
@@ -249,6 +260,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.connection_switch_requested.emit()
+        self._force_close = True   # 切换连接需真正关窗，不能隐藏到托盘
         self.close()
 
     def _select_file(self):

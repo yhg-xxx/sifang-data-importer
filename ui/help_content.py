@@ -6,7 +6,7 @@ from app.constants import ERROR_CONTACT
 def build_help_html() -> str:
     """返回帮助窗口的完整 HTML 正文。"""
     return f"""<div>
-<h1>四方数据导入工具</h1>
+<h1>四方信息源入库</h1>
 <p>将 Excel 文件中 40+ 个 Sheet（每个对应一张表）的数据批量导入 SQL Server；
 支持内置去重、失败表自动跳过并生成错误名单、失败 Sheet 一键补录，面向内部少量用户使用。</p>
 
