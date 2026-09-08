@@ -78,8 +78,11 @@ class DedupSettingsDialog(QDialog):
 
         # ── 摘要（兼作确认信息） ──
         summary = QLabel(
-            f"将对勾选的 {selected_count} 个 Sheet 去重（其余 Sheet 原样复制），保留首次出现的行。\n"
-            f"判重键 = 判重列值去首尾空白并全角转半角；判重列为空的行不参与判重、原样保留。\n"
+            f"将对勾选的 {selected_count} 个 Sheet 去重（其余 Sheet 原样复制），"
+            f"保留录入时间(第一列)最早的行，平手保留首次出现。\n"
+            f"判重键 = 判重列值去首尾空白并全角转半角；判重列为空的行不参与判重、原样保留。"
+            f"录入时间为空或无法解析的行同样不参与去重、原样保留；"
+            f"仅当企业名称与录入时间均可解析时，按录入时间最早保留。\n"
             f"输出: 源文件同目录「{os.path.basename(output_path_for(excel_path))}」"
             f"（如已存在自动加时间戳，不覆盖任何已有文件）；\n"
             f"如有删除将同时生成「{os.path.basename(duplicates_csv_path_for(excel_path))}」"

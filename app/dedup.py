@@ -1,13 +1,15 @@
-"""数据去重 - 流式读取 + 内存判重 + 只写保留行到全新 Excel
+"""数据去重 - 两遍处理（扫描定保留 + 写出跳删除）+ 全新 Excel 落盘
 
-与旧去重工具（Go 引擎直接改写 xlsx 内部 XML、删行后上移）不同：
-本模块单遍流式处理，重复行根本不写入输出文件，
-「阶段2 残留删不净」类问题在结构上不存在。
+判重键 = 判重列（默认 D 企业名称）经 normalize_dedup_key 规范化；
+**去留依据** = 第一列录入时间(A 列 collected_at) 经 parse_date 解析为 date：
+同一判重键的多行中，保留录入时间最早者；平手（同日期）保留文件中首次出现者。
+空判重键或空/不可解析录入时间的行不参与去重、原样保留。
 
 - 读：python-calamine 一次载入、多 Sheet 复用（与导入流程同一套）
 - 写：xlsxwriter constant_memory 模式，逐行落盘、内存恒定
-- 判重键 = 判重列值经 normalize_dedup_key 规范化（strip + 全角转半角）；
-  空键不参与判重（行保留，交给「验证数据」报 NOT NULL）
+- 两遍：第一遍扫描选中 Sheet 缓存行 + 计算每个判重键的保留行（最小录入时间）；
+  第二遍按 Sheet 顺序写出，命中保留行则写、否则删除（不写出）。
+  constant_memory 一旦写出不可回退，故必须先扫描后写出。
 - 未勾选的 Sheet 原样复制进输出文件，保证交付文件完整
 - 输出永不覆盖任何已有文件：目标 xlsx 或重复清单 CSV 已存在时自动加时间戳
 """
@@ -21,13 +23,17 @@ import xlsxwriter
 from python_calamine import CalamineWorkbook
 
 from app import logger
+from app.date_utils import parse_date
 from app.utils import normalize_dedup_key
 
 DEDUP_SUFFIX = "_已去重"
 DUPLICATES_SUFFIX = "__重复清单"
 
 MODE_SHEET = "sheet"    # 按 Sheet 内去重（跨 Sheet 同名保留，与 46 表独立导入语义一致）
-MODE_GLOBAL = "global"  # 全局去重（所有选中 Sheet 共用判重记录，按文件内 Sheet 顺序保留首个）
+MODE_GLOBAL = "global"  # 全局去重（所有选中 Sheet 共用判重记录，跨 Sheet 保留录入时间最早者）
+
+# 录入时间列固定为 A 列（schema: collected_at, excel_index=0, DB date 类型）
+_TIME_COL_INDEX = 1
 
 _DATETIME_FORMAT = "yyyy-mm-dd hh:mm:ss"
 _TIME_FORMAT = "hh:mm:ss"
@@ -129,10 +135,15 @@ def run_dedup(excel_path: str, selected_sheet_names: list = None,
         "start_time": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
         "end_time": "", "elapsed": 0.0, "error": "",
     }
-    # 判重作用域键 -> {"kept": (Sheet, 行号, 原始值), "deleted": [(Sheet, 行号, 原始值), ...]}；
-    # 全局模式键为判重键本身，按 Sheet 模式键为 (Sheet名, 判重键)，两口径互不混组。
+    # 判重作用域键 -> {"kept": (Sheet, 行号, 原始键值, 录入时间原始值),
+    #                  "deleted": [(Sheet, 行号, 原始键值, 录入时间原始值), ...]}；
+    # 全局模式键为判重键本身，Sheet 模式键为 (Sheet名, 判重键)，两口径互不混组。
     # dict 保持插入序：对照组按保留行首次出现顺序排列
     groups = {}
+    # 作用域键 -> 保留行信息 {"time": date, "sheet": str, "row_num": int,
+    #                        "raw_key": str, "raw_time": str}
+    # 仅当严格更早 (t < existing.time) 时替换；相等不替换 → 平手保留首次出现
+    keepers = {}
     wb = None
     book = None
     cancelled = False
@@ -152,106 +163,180 @@ def run_dedup(excel_path: str, selected_sheet_names: list = None,
 
     try:
         wb = CalamineWorkbook.from_path(excel_path)
-        book = xlsxwriter.Workbook(out_path, {"constant_memory": True})
-        # constant_memory 模式惯例：格式在写任何数据前创建
-        date_fmt = book.add_format({"num_format": _DATETIME_FORMAT})
-        time_fmt = book.add_format({"num_format": _TIME_FORMAT})
-
         all_names = list(wb.sheet_names)
         total = len(all_names)
+        selected_names = [n for n in all_names if n in selected]
 
-        for i, sheet_name in enumerate(all_names):
+        # ── Pass 1: 扫描选中 Sheet，缓存 (表头+数据行) 并计算每个判重键的保留行 ──
+        # sheet_data_cache[sheet_name] = (header, [(row_num, values), ...])
+        sheet_data_cache = {}
+        for i, sheet_name in enumerate(selected_names):
             if cancel_check and cancel_check():
                 cancelled = True
                 break
-            is_selected = sheet_name in selected
-            action = "去重" if is_selected else "复制"
             if progress_callback:
-                progress_callback(i, total, f"正在{action} ({i + 1}/{total}): {sheet_name}")
-
-            ws_out = book.add_worksheet(sheet_name)
+                progress_callback(
+                    i, len(selected_names),
+                    f"正在扫描 ({i + 1}/{len(selected_names)}): {sheet_name}")
             rows_iter = wb.get_sheet_by_name(sheet_name).iter_rows()
-
-            # 表头原样写出
             header = next(rows_iter, None)
-            if header is not None:
-                _write_row(ws_out, 0, list(header), date_fmt, time_fmt)
-
-            out_row = 1
-            row_num = 2  # 实际 Excel 行号（数据从第 2 行开始，含被跳过的重复行）
-            sheet_total = 0
-            sheet_deleted = 0
+            cached_rows = []
+            row_num = 2  # 数据从第 2 行开始
             for row in rows_iter:
                 if cancel_check and cancel_check():
                     cancelled = True
                     break
                 values = list(row)
-                sheet_total += 1
-                if is_selected:
-                    raw_key = values[audit_col_index - 1] if len(values) >= audit_col_index else None
-                    key = normalize_dedup_key(raw_key)
-                    if key:
-                        raw_val = "" if raw_key is None else str(raw_key)
-                        scope_key = key if mode == MODE_GLOBAL else (sheet_name, key)
-                        grp = groups.get(scope_key)
-                        if grp is not None:
-                            sheet_deleted += 1
-                            grp["deleted"].append((sheet_name, row_num, raw_val))
-                            row_num += 1
-                            continue
-                        groups[scope_key] = {
-                            "kept": (sheet_name, row_num, raw_val),
-                            "deleted": [],
+                cached_rows.append((row_num, values))
+                # 判重键 + 录入时间
+                raw_key = (values[audit_col_index - 1]
+                           if len(values) >= audit_col_index else None)
+                key = normalize_dedup_key(raw_key)
+                raw_time_val = (values[_TIME_COL_INDEX - 1]
+                                if len(values) >= _TIME_COL_INDEX else None)
+                t = parse_date(raw_time_val)
+                if key and t is not None:
+                    scope_key = key if mode == MODE_GLOBAL else (sheet_name, key)
+                    raw_key_str = "" if raw_key is None else str(raw_key)
+                    raw_time_str = "" if raw_time_val is None else str(raw_time_val)
+                    cur = keepers.get(scope_key)
+                    if cur is None or t < cur["time"]:
+                        keepers[scope_key] = {
+                            "time": t, "sheet": sheet_name, "row_num": row_num,
+                            "raw_key": raw_key_str, "raw_time": raw_time_str,
                         }
-                _write_row(ws_out, out_row, values, date_fmt, time_fmt)
-                out_row += 1
                 row_num += 1
+            sheet_data_cache[sheet_name] = (header, cached_rows)
 
-            result["sheets"].append({
-                "sheet": sheet_name, "total": sheet_total,
-                "kept": sheet_total - sheet_deleted, "deleted": sheet_deleted,
-                "copied_only": not is_selected, "unfinished": cancelled,
-            })
-            result["total_rows"] += sheet_total
-            result["total_deleted"] += sheet_deleted
-            if progress_callback:
+        if cancelled:
+            # 扫描未完成：无法可靠写出，不产生输出文件
+            result["pending_sheets"] = list(all_names)
+            result["success"] = False
+            result["cancelled"] = True
+            _finish_timing()
+        else:
+            # ── Pass 2: 按 all_names 顺序写出（命中保留行则写、否则跳过） ──
+            book = xlsxwriter.Workbook(out_path, {"constant_memory": True})
+            # constant_memory 模式惯例：格式在写任何数据前创建
+            date_fmt = book.add_format({"num_format": _DATETIME_FORMAT})
+            time_fmt = book.add_format({"num_format": _TIME_FORMAT})
+
+            for i, sheet_name in enumerate(all_names):
+                if cancel_check and cancel_check():
+                    cancelled = True
+                    break
+                is_selected = sheet_name in selected
+                action = "去重" if is_selected else "复制"
+                if progress_callback:
+                    progress_callback(i, total, f"正在{action} ({i + 1}/{total}): {sheet_name}")
+
+                ws_out = book.add_worksheet(sheet_name)
+
                 if is_selected:
-                    summary = (f"{sheet_name}: 共 {sheet_total} 行，"
-                               f"删除 {sheet_deleted} 行，保留 {sheet_total - sheet_deleted} 行")
+                    header, cached_rows = sheet_data_cache[sheet_name]
+                    row_iter = iter(cached_rows)
                 else:
-                    summary = f"{sheet_name}: 原样复制 {sheet_total} 行"
-                progress_callback(i, total, summary)
+                    rows_iter = wb.get_sheet_by_name(sheet_name).iter_rows()
+                    header = next(rows_iter, None)
+                    row_iter = _iter_with_row_num(rows_iter)
 
-            if cancelled:
-                break
+                # 表头原样写出
+                if header is not None:
+                    _write_row(ws_out, 0, list(header), date_fmt, time_fmt)
 
-        result["pending_sheets"] = all_names[len(result["sheets"]):]
+                out_row = 1
+                sheet_total = 0
+                sheet_deleted = 0
+                for row_num, values in row_iter:
+                    if cancel_check and cancel_check():
+                        cancelled = True
+                        break
+                    sheet_total += 1
+                    if is_selected:
+                        raw_key = (values[audit_col_index - 1]
+                                   if len(values) >= audit_col_index else None)
+                        key = normalize_dedup_key(raw_key)
+                        raw_time_val = (values[_TIME_COL_INDEX - 1]
+                                        if len(values) >= _TIME_COL_INDEX else None)
+                        t = parse_date(raw_time_val)
+                        if key and t is not None:
+                            scope_key = key if mode == MODE_GLOBAL else (sheet_name, key)
+                            keeper = keepers.get(scope_key)
+                            is_keeper = (keeper is not None
+                                         and keeper["sheet"] == sheet_name
+                                         and keeper["row_num"] == row_num)
+                            raw_key_str = "" if raw_key is None else str(raw_key)
+                            raw_time_str = "" if raw_time_val is None else str(raw_time_val)
+                            if is_keeper:
+                                # 保留行：写出，并首次登记进 groups
+                                if scope_key not in groups:
+                                    groups[scope_key] = {
+                                        "kept": (sheet_name, row_num, raw_key_str, raw_time_str),
+                                        "deleted": [],
+                                    }
+                            else:
+                                # 删除行：不写出，登记进 deleted
+                                # （keeper 必在更早 Sheet/行，确保 groups 已建/补建）
+                                sheet_deleted += 1
+                                if scope_key not in groups:
+                                    k = keepers[scope_key]
+                                    groups[scope_key] = {
+                                        "kept": (k["sheet"], k["row_num"],
+                                                 k["raw_key"], k["raw_time"]),
+                                        "deleted": [],
+                                    }
+                                groups[scope_key]["deleted"].append(
+                                    (sheet_name, row_num, raw_key_str, raw_time_str))
+                                continue
+                    _write_row(ws_out, out_row, values, date_fmt, time_fmt)
+                    out_row += 1
 
-        # constant_memory 模式在 close 时才真正打包输出文件。
-        # 取消时可能一个 Sheet 都没写（close 有可能失败），吞掉不影响「已取消」语义
-        close_ok = True
-        try:
-            book.close()
-        except Exception:
-            close_ok = False
-            if not cancelled:
-                raise
+                result["sheets"].append({
+                    "sheet": sheet_name, "total": sheet_total,
+                    "kept": sheet_total - sheet_deleted, "deleted": sheet_deleted,
+                    "copied_only": not is_selected, "unfinished": cancelled,
+                })
+                result["total_rows"] += sheet_total
+                result["total_deleted"] += sheet_deleted
+                if progress_callback:
+                    if is_selected:
+                        summary = (f"{sheet_name}: 共 {sheet_total} 行，"
+                                   f"删除 {sheet_deleted} 行，保留 {sheet_total - sheet_deleted} 行")
+                    else:
+                        summary = f"{sheet_name}: 原样复制 {sheet_total} 行"
+                    progress_callback(i, total, summary)
+
+                if cancelled:
+                    break
+
+            result["pending_sheets"] = all_names[len(result["sheets"]):]
+
+            # constant_memory 模式在 close 时才真正打包输出文件。
+            # 取消时可能一个 Sheet 都没写（close 有可能失败），吞掉不影响「已取消」语义
+            close_ok = True
+            try:
+                book.close()
+            except Exception:
+                close_ok = False
+                if not cancelled:
+                    raise
+
+            if close_ok and os.path.exists(out_path):
+                result["output_path"] = out_path
+                if any(g["deleted"] for g in groups.values()):
+                    _write_duplicates_csv(csv_path, groups)
+                    result["duplicates_csv"] = csv_path
+
+            result["success"] = not cancelled
+            result["cancelled"] = cancelled
+            _finish_timing()
+
         if wb is not None:
             try:
                 wb.close()  # 及时释放源文件句柄
             except Exception:
                 pass
             wb = None
-
-        if close_ok and os.path.exists(out_path):
-            result["output_path"] = out_path
-            if any(g["deleted"] for g in groups.values()):
-                _write_duplicates_csv(csv_path, groups)
-                result["duplicates_csv"] = csv_path
-
-        result["success"] = not cancelled
-        result["cancelled"] = cancelled
-        _finish_timing()
     except PermissionError:
         _finish_timing()
         result["error"] = "输出文件被占用（可能正在 Excel 中打开），请关闭后重试"
@@ -274,6 +359,14 @@ def run_dedup(excel_path: str, selected_sheet_names: list = None,
     except Exception:
         pass
     return result
+
+
+def _iter_with_row_num(rows_iter):
+    """把 calamine 行迭代器转成 (row_num, values)，row_num 从 2 开始（表头已跳过）。"""
+    row_num = 2
+    for row in rows_iter:
+        yield row_num, list(row)
+        row_num += 1
 
 
 def _write_row(ws, row_idx: int, values: list, date_fmt, time_fmt) -> None:
@@ -299,16 +392,17 @@ def _write_duplicates_csv(csv_path: str, groups: dict) -> None:
     """写出保留/删除对照清单（UTF-8-SIG，Excel 直接打开中文不乱码）。
 
     长表结构：同一判重键的保留行与其全部删除行相邻成组，组间按保留行首次
-    出现顺序排列；保留/删除各自显示自己的判重列原始值，全角/半角、空格
-    差异一目了然（这正是它们被判为重复的原因）。仅收录有删除记录的键。
+    出现顺序排列；保留/删除各自显示自己的判重列原始值与录入时间原始值，
+    全角/半角、空格差异一目了然（这正是它们被判为重复的原因）。仅收录有
+    删除记录的键。
     """
     with open(csv_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        writer.writerow(["处理", "Sheet名称", "Excel行号", "判重列原始值"])
+        writer.writerow(["处理", "Sheet名称", "Excel行号", "判重列原始值", "录入时间"])
         for grp in groups.values():
             if not grp["deleted"]:
                 continue
-            sheet, row, raw = grp["kept"]
-            writer.writerow(["保留", sheet, row, raw])
-            for sheet, row, raw in grp["deleted"]:
-                writer.writerow(["删除", sheet, row, raw])
+            sheet, row, raw_key, raw_time = grp["kept"]
+            writer.writerow(["保留", sheet, row, raw_key, raw_time])
+            for sheet, row, raw_key, raw_time in grp["deleted"]:
+                writer.writerow(["删除", sheet, row, raw_key, raw_time])
