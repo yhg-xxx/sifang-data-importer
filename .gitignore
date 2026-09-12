@@ -3,6 +3,7 @@ local.db
 信息源8.8_已去重.xlsx
 import_log.txt
 *.log
+enterprise_info_*.sql
 
 # IDE 配置（含内网连接信息）
 .idea/

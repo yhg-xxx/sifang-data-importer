@@ -1,5 +1,25 @@
 """通用工具函数 - Excel 列索引与列字母互转等共享功能"""
 
+from datetime import datetime
+
+# 输出文件名时间戳统一格式（去重输出与导入错误名单共用）
+TIMESTAMP_FORMAT = "%Y%m%d_%H%M%S"
+
+
+def timestamped_output_candidates(base: str, ext: str):
+    """生成带时间戳的输出候选路径（惰性生成器）：
+    「base_时间戳.ext」→「base_时间戳_2.ext」→「base_时间戳_3.ext」→ …
+
+    去重输出与导入错误名单共用的「永不覆盖」约定：调用方逐个候选做存在性
+    检查，首个未占用者即实际输出路径（同秒冲突从 _2 起计数）。
+    """
+    stamp = datetime.now().strftime(TIMESTAMP_FORMAT)
+    yield f"{base}_{stamp}{ext}"
+    n = 2
+    while True:
+        yield f"{base}_{stamp}_{n}{ext}"
+        n += 1
+
 
 def col_letter(idx: int) -> str:
     """Excel 列索引(1-based) → 列字母：1→A, 27→AA。"""

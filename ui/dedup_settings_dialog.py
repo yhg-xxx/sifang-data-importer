@@ -84,7 +84,7 @@ class DedupSettingsDialog(QDialog):
             f"录入时间为空或无法解析的行同样不参与去重、原样保留；"
             f"仅当企业名称与录入时间均可解析时，按录入时间最早保留。\n"
             f"输出: 源文件同目录「{os.path.basename(output_path_for(excel_path))}」"
-            f"（如已存在自动加时间戳，不覆盖任何已有文件）；\n"
+            f"（如已存在自动加时间戳，不覆盖任何已有文件），保留源文件全部格式（样式/条件格式/超链接等）；\n"
             f"如有删除将同时生成「{os.path.basename(duplicates_csv_path_for(excel_path))}」"
             f"（保留/删除对照清单）。"
         )

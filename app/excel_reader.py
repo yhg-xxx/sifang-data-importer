@@ -6,6 +6,30 @@ import xml.etree.ElementTree as ET
 from python_calamine import CalamineWorkbook
 
 
+_R_NS = "{http://schemas.openxmlformats.org/officeDocument/2006/relationships}"
+
+
+def read_sheet_entries(filepath: str) -> list[tuple[str, str | None]]:
+    """解析 xl/workbook.xml，返回 [(sheet名, rId)]（ElementTree 正确处理属性
+    引号与实体转义）。
+
+    供 read_sheets 的 sheet 名列表与 xlsx_surgery 的 XML 条目定位共用同一份
+    解析，避免两套解析器对同一文件各自漂移；rId 缺失（rels 异常的 sheet）
+    时为 None，由调用方决定取舍。
+    """
+    ns = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+    result = []
+
+    with zipfile.ZipFile(filepath, "r") as z:
+        with z.open("xl/workbook.xml") as f:
+            for sheet_elem in ET.parse(f).getroot().findall(f".//{ns}sheet"):
+                name = sheet_elem.get("name")
+                if name:
+                    result.append((name, sheet_elem.get(f"{_R_NS}id")))
+
+    return result
+
+
 def read_sheets(filepath: str) -> list[dict]:
     """读取 sheet 名称（通过 zipfile 解析 xl/workbook.xml，秒级完成）。
 
@@ -15,19 +39,7 @@ def read_sheets(filepath: str) -> list[dict]:
             ...
         ]
     """
-    ns = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
-    result = []
-
-    with zipfile.ZipFile(filepath, "r") as z:
-        with z.open("xl/workbook.xml") as f:
-            tree = ET.parse(f)
-            root = tree.getroot()
-            for sheet_elem in root.findall(f".//{{{ns}}}sheet"):
-                name = sheet_elem.get("name")
-                if name:
-                    result.append({"sheet_name": name})
-
-    return result
+    return [{"sheet_name": name} for name, _rid in read_sheet_entries(filepath)]
 
 
 def iter_sheet_rows_from_workbook(

@@ -44,8 +44,9 @@ class DedupWorker(QThread):
                 lambda current, total, message: self.progress.emit(current, total, message),
                 cancel_check=lambda: self._cancelled,
             )
-        except Exception as e:
-            # 兜底：任何意外异常也必须发结果信号，避免对话框永久卡在运行态
+        except BaseException as e:
+            # 兜底：任何意外异常（含 PanicException 等非 Exception 派生错误）也
+            # 必须发结果信号，避免对话框永久卡在运行态
             result = {
                 "success": False, "cancelled": False, "error": str(e),
                 "sheets": [], "pending_sheets": [],
@@ -124,7 +125,7 @@ class DedupDialog(BaseTaskDialog):
 
         if result.get("cancelled"):
             self._result_ok = False
-            self._status_label.setText("已取消（输出文件仅包含已处理部分）")
+            self._status_label.setText("已取消（未生成输出文件）")
             self._status_label.setStyleSheet(f"color: {WARNING}; font-weight: bold;")
             pending = result.get("pending_sheets") or []
             if pending:
@@ -151,7 +152,7 @@ class DedupDialog(BaseTaskDialog):
         self._result_table.setRowCount(len(sheets))
         for i, s in enumerate(sheets):
             if s.get("copied_only"):
-                action = "原样复制"
+                action = "原样复制" + ("（未完成）" if s.get("unfinished") else "")
             else:
                 action = "去重" + ("（未完成）" if s.get("unfinished") else "")
             self._set_cell(i, 0, str(i + 1), Qt.AlignmentFlag.AlignCenter)

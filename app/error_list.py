@@ -12,19 +12,15 @@ from datetime import datetime
 import xlsxwriter
 
 from app.error_msgs import humanize_db_error
-from app.utils import merge_row_ranges
+from app.utils import merge_row_ranges, timestamped_output_candidates
 
 
 def _resolve_output_path(source_dir: str, source_stem: str) -> str:
     """生成不与任何已有文件冲突的名单路径；同秒冲突加 _2 计数后缀。"""
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    base = os.path.join(source_dir, f"{source_stem}__导入错误名单_{ts}")
-    path = base + ".xlsx"
-    counter = 2
-    while os.path.exists(path):
-        path = f"{base}_{counter}.xlsx"
-        counter += 1
-    return path
+    base = os.path.join(source_dir, f"{source_stem}__导入错误名单")
+    for path in timestamped_output_candidates(base, ".xlsx"):
+        if not os.path.exists(path):
+            return path
 
 
 def _clean_text(value) -> str:
