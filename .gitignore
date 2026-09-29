@@ -1,6 +1,8 @@
 # 敏感数据（禁止上传）
 local.db
-信息源8.8_已去重.xlsx
+*_已去重*.xlsx
+重复清单__*.csv
+*__duplicates.csv
 import_log.txt
 *.log
 enterprise_info_*.sql

@@ -144,16 +144,16 @@ def main():
         )
         return
 
-    switch_requested = {"flag": False}    # 本轮主窗口是否因“连接管理”而关闭
-    skip_auto_connect = {"flag": False}   # 下一轮是否跳过自动连接（刚切换完，让用户重选）
+    switch_result = {"payload": None}   # 主窗口切换连接成功时递来的新连接参数
 
     def run_main_window(conn, db_info, schema, conn_name):
         window = MainWindow(conn, db_info, schema, connection_name=conn_name)
         window._minimize_to_tray = tray_available
         window.setWindowIcon(tray.icon)   # 显式设到窗口，确保任务栏/标题栏生效
 
-        def _on_switch():
-            switch_requested["flag"] = True
+        def _on_switch(payload):
+            """主窗口切换连接成功：新连接已由窗口建立并递来，下一轮直接复用。"""
+            switch_result["payload"] = payload
 
         window.connection_switch_requested.connect(_on_switch)
 
@@ -164,8 +164,10 @@ def main():
 
         def _quit_from_tray():
             modal = app.activeModalWidget()
-            if modal is not None:
-                # 导入/去重/验证等任务对话框打开中：强杀会中断任务，拒绝退出
+            # 只拦真正的任务对话框（导入/去重/验证，以及正在测试连接的连接对话框）。
+            # 连接对话框空闲时不是任务，放行退出——拦下它再谎报「有任务正在进行」
+            # 属误导；blocks_quit 由对话框自己声明，未知模态窗口按 True 保守处理。
+            if modal is not None and getattr(modal, "blocks_quit", True):
                 modal.raise_()
                 modal.activateWindow()
                 tray.notify_busy()
@@ -194,51 +196,49 @@ def main():
         tray.show_requested.disconnect(_restore_window)
         tray.quit_requested.disconnect(_quit_from_tray)
         window.hidden_to_tray.disconnect(tray.notify_hidden_to_tray)
-        tray.hide()
+        # 此处不 tray.hide()：切换连接时下一轮还要 show，一隐一显会让托盘图标闪一下。
+        # 真正的撤图标放在循环退出处（唯一真的不再需要托盘的时刻）。
         window.close()
 
     while True:
-        conn = None
-        schema = "dbo"
-        conn_name = ""
-        db_info = ""
+        payload = switch_result["payload"]
+        if payload is not None:
+            # 切换连接成功：新连接已由主窗口建立（旧连接也已由它关闭），
+            # 直接复用，不再自动连接、也不再弹连接对话框
+            switch_result["payload"] = None
+            conn, db_info, schema, conn_name = payload
+        else:
+            conn = None
+            schema = "dbo"
+            conn_name = ""
+            db_info = ""
 
-        # 刚切换过连接 -> 不自动连，直接进入连接管理让用户重选
-        if not skip_auto_connect["flag"]:
             auto_result = _try_auto_connect_async(app)
             if auto_result:
                 conn, schema, conn_name, db_info = auto_result
 
-        if conn is None:
-            dialog = ConnectionDialog()
-            if dialog.exec() != ConnectionDialog.DialogCode.Accepted:
-                return  # 用户取消，退出应用
-
-            conn = dialog.connection
-            schema = dialog.schema
-            conn_name = dialog.connection_name
             if conn is None:
-                return
-            db_info = ""
-            cfg = local_db.get_last_connection()
-            if cfg:
-                db_info = f"{cfg['server']}/{cfg['database']} (schema: {schema})"
+                dialog = ConnectionDialog(mode="startup")
+                if dialog.exec() != ConnectionDialog.DialogCode.Accepted:
+                    # 启动路径无处可退，取消即退出（按钮文案为「退出」）
+                    return
+
+                conn = dialog.connection
+                schema = dialog.schema
+                conn_name = dialog.connection_name
+                if conn is None:
+                    return
+                db_info = ""
+                cfg = local_db.get_last_connection()
+                if cfg:
+                    db_info = f"{cfg['server']}/{cfg['database']} (schema: {schema})"
 
         run_main_window(conn, db_info, schema, conn_name)
 
-        if switch_requested["flag"]:
-            switch_requested["flag"] = False   # 复位：下一轮主窗口视为正常关闭
-            skip_auto_connect["flag"] = True   # 下一轮不自动连，让用户选库
-            try:
-                if conn:
-                    conn.close()
-            except Exception:
-                pass
-            continue
-        else:
-            # 用户正常关闭窗口（含点 ✕），退出
-            skip_auto_connect["flag"] = False
-            break
+        if switch_result["payload"] is None:
+            break   # 正常关窗（含点 ✕ / 托盘退出）：结束程序
+
+    tray.hide()   # 先撤图标再退出，避免退出后托盘残留
 
 
 if __name__ == "__main__":
