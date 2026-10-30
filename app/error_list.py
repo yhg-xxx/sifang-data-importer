@@ -159,7 +159,7 @@ def generate_error_list(excel_path: str, failed_tables: dict) -> str:
     ws_sum.write(row, 1, f"{len({s for _, s in summary})} 个 Sheet", total_fmt)
     ws_sum.write(row, 2, sum(_entry_count(e) for e in summary.values()), total_fmt)
     ws_sum.write(row, 3, "", total_fmt)
-    ws_sum.write(row, 4, "修正后请通知数据组补录", total_left_fmt)
+    ws_sum.write(row, 4, "修正后请通知数智组补录", total_left_fmt)
 
     ws_sum.set_column(0, 0, 14)
     ws_sum.set_column(1, 1, 24)

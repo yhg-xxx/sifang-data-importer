@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QFileDialog,
     QMessageBox,
+    QLineEdit,
 )
 from PySide6.QtCore import QEvent, Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QAction, QBrush, QColor, QKeySequence
@@ -28,6 +29,7 @@ from ui.import_dialog import ImportDialog
 from ui.validate_dialog import ValidateDialog
 from ui.dedup_settings_dialog import DedupSettingsDialog
 from ui.dedup_dialog import DedupDialog
+from ui.connection_dialog import ConnectionDialog
 from ui.sheet_directory_dialog import SheetDirectoryDialog
 from ui.column_mapping_dialog import ColumnMappingDialog
 from ui.toast import toast
@@ -55,7 +57,7 @@ class SheetReaderWorker(QThread):
 class MainWindow(QMainWindow):
     """用户成功连接数据库后显示的主窗口。"""
 
-    connection_switch_requested = Signal()
+    connection_switch_requested = Signal(object)   # 携带 (conn, db_info, schema, name)
     hidden_to_tray = Signal()   # 关窗被改为隐藏到托盘时发出（托盘据此气泡提示）
 
     def __init__(self, conn, db_info: str, schema: str = "dbo", connection_name: str = "", parent=None):
@@ -75,6 +77,8 @@ class MainWindow(QMainWindow):
         self._loading_file_name = ""
         self._updating_header = False  # 防止表头 checkbox 更新递归
         self._anchor_row = -1  # Shift 范围勾选的锚点行
+        self._filter_keyword = ""       # 当前生效的筛选关键词（小写，空 = 无筛选）
+        self._filter_unchecked = set()  # 因筛选被取消勾选的行（增量取消清单，可回退）
         self._minimize_to_tray = False  # 托盘可用时由 main.py 置 True：关窗改为隐藏到托盘
         self._force_close = False       # 切换连接 / 托盘退出时置 True：绕过隐藏逻辑真正关窗
         self._help_dlg = None  # 使用说明窗口（非模态，复用同一实例）
@@ -128,6 +132,17 @@ class MainWindow(QMainWindow):
         self._file_label.setProperty("secondary", True)
         file_layout.addWidget(self._file_label, 1)
 
+        # 搜索框（紧靠「选择文件」左侧）：按 Sheet 名称即时过滤下方表格
+        self._search_edit = QLineEdit()
+        self._search_edit.setPlaceholderText("搜索 Sheet 名称...")
+        self._search_edit.setClearButtonEnabled(True)
+        self._search_edit.setFixedWidth(220)
+        self._search_edit.setToolTip("输入关键词即时过滤（Ctrl+F 聚焦，Esc 清空）")
+        self._search_edit.textChanged.connect(self._apply_filter)
+        self._search_edit.installEventFilter(self)   # 接管 Esc：清空而非关窗
+        file_layout.addWidget(self._search_edit)
+        file_layout.addSpacing(10)
+
         self._select_btn = QPushButton("选择文件")
         self._select_btn.clicked.connect(self._select_file)
         file_layout.addWidget(self._select_btn)
@@ -165,11 +180,18 @@ class MainWindow(QMainWindow):
         # 列0固定宽度（给 checkbox 留足够空间）
         self._sheet_table.setColumnWidth(0, 50)
 
+        # Ctrl+F 聚焦搜索框（搜索框本体在文件选择行，「选择文件」左侧）
+        find_action = QAction("搜索 Sheet", self)
+        find_action.setShortcut(QKeySequence.Find)
+        find_action.triggered.connect(self._focus_search)
+        self.addAction(find_action)
+
         card_layout.addWidget(self._sheet_table, 1)
 
         # 全选行（卡片底部：全选 checkbox + 已选计数）
         header_cb_layout = QHBoxLayout()
         self._header_cb = QCheckBox("全选")
+        self._header_cb.setTristate(True)   # 部分可见行选中时显示半勾（区分于全不勾）
         self._header_cb.setChecked(True)
         self._header_cb.stateChanged.connect(self._on_header_checkbox_clicked)
         header_cb_layout.addWidget(self._header_cb)
@@ -228,8 +250,15 @@ class MainWindow(QMainWindow):
         self.statusBar().installEventFilter(self)
 
     def eventFilter(self, obj, event):
-        """吞掉状态栏的 StatusTip 事件（菜单悬停触发），防止顶掉左侧连接信息。"""
+        """吞掉状态栏的 StatusTip 事件（菜单悬停触发），防止顶掉左侧连接信息；
+        另接管搜索框的 Esc：清空关键词而不关窗口、不冒泡。
+        """
         if obj is self.statusBar() and event.type() == QEvent.Type.StatusTip:
+            return True
+        if (obj is getattr(self, "_search_edit", None)
+                and event.type() == QEvent.Type.KeyPress
+                and event.key() == Qt.Key.Key_Escape):
+            self._search_edit.clear()   # 触发 textChanged -> _apply_filter 还原
             return True
         return super().eventFilter(obj, event)
 
@@ -270,16 +299,42 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _switch_connection(self):
+        """切换连接：先弹连接对话框，**连接成功才**关旧连接与旧窗口。
+
+        「延后销毁」而非「先关后弹」，是为了让取消成为真正的无操作——旧连接与
+        旧窗口都还在，用户原样回到切换前的状态（旧实现先 close 连接与窗口，
+        取消时无处可退，main.py 的同一个 return 会把整个程序关掉）。
+
+        另注意必须先 exec() 拿到结果再关窗口：对话框是主窗口的子窗口，
+        父窗口一关它跟着析构，结果就读不到了。
+        """
         if self._reader_worker is not None:
             toast.warning(self, "正在读取文件，请等待读取完成后再切换连接")
             return
-        """请求切换连接：关闭当前窗口，通知main.py重新走连接流程。"""
+
+        dialog = ConnectionDialog(self, mode="switch")
+        if dialog.exec() != ConnectionDialog.DialogCode.Accepted:
+            return   # 取消：旧连接与旧窗口原样保留
+
+        conn = dialog.connection
+        if conn is None:
+            return   # 防御：Accepted 但未拿到连接，按取消处理
+
+        schema = dialog.schema
+        conn_name = dialog.connection_name
+        cfg = local_db.get_last_connection()
+        db_info = (
+            f"{cfg['server']}/{cfg['database']} (schema: {schema})" if cfg else ""
+        )
+
+        # 新连接已建立、已写入 local_db，现在才销毁旧的一切
         try:
             if self._conn:
                 self._conn.close()
         except Exception:
             pass
-        self.connection_switch_requested.emit()
+
+        self.connection_switch_requested.emit((conn, db_info, schema, conn_name))
         self._force_close = True   # 切换连接需真正关窗，不能隐藏到托盘
         self.close()
 
@@ -325,6 +380,7 @@ class MainWindow(QMainWindow):
         self._dedup_btn.setEnabled(False)
         self._file_label.setText(f"正在读取: {file_name} ...")
         self._sheet_table.setRowCount(0)
+        self._reset_filter()
 
         self._loading_file_name = file_name
         self._load_start_time = time.time()
@@ -362,6 +418,7 @@ class MainWindow(QMainWindow):
         self._clear_btn.setVisible(False)
         self._file_label.setText("未选择文件")
         self._sheet_table.setRowCount(0)
+        self._reset_filter()
 
     def _clear_file(self):
         """清除当前选择的 Excel 文件，恢复初始状态。"""
@@ -370,6 +427,7 @@ class MainWindow(QMainWindow):
         self._excel_path = ""
         self._sheets = []
         self._sheet_table.setRowCount(0)
+        self._reset_filter()
         self._import_btn.setEnabled(False)
         self._validate_btn.setEnabled(False)
         self._dedup_btn.setEnabled(False)
@@ -382,6 +440,9 @@ class MainWindow(QMainWindow):
         self._file_label.setText(f"正在读取: {self._loading_file_name} ... (已用时 {elapsed}s)")
 
     def _update_sheet_info(self):
+        # 表格即将整体重建：先清空搜索框与取消清单，避免旧关键词过滤掉新行
+        self._reset_filter()
+
         # 从 SQLite 获取 sheet→最后导入时间/导入状态 的映射
         mappings = local_db.get_sheet_names()
         time_map = {m["sheet_name"]: m["last_import_time"] for m in mappings}
@@ -442,25 +503,106 @@ class MainWindow(QMainWindow):
                     return item.widget()
         return None
 
+    def _focus_search(self):
+        """Ctrl+F：聚焦搜索框并全选，便于直接覆盖上一次关键词。"""
+        self._search_edit.setFocus()
+        self._search_edit.selectAll()
+
+    def _apply_filter(self, text: str):
+        """按关键词过滤行，并维持「隐藏即未勾选」不变式。
+
+        规则（增量取消清单）：隐藏一个仍勾着的行 -> 取消勾选并记入清单；
+        重新可见 -> 若在清单中则勾回并出清单；清空关键词 -> 清单里的行全部勾回。
+        这样「输入即收窄选区」全程可回退（清空关键词即还原），且系统只回退
+        自己造成的取消——用户手动点过的行在 _on_row_check_clicked 里已出清单。
+        """
+        keyword = text.strip().lower()
+        self._filter_keyword = keyword
+
+        self._updating_header = True   # 批量改勾选期间抑制表头逐行重算
+        for row in range(self._sheet_table.rowCount()):
+            name_item = self._sheet_table.item(row, 2)
+            name = name_item.text().lower() if name_item else ""
+            visible = (not keyword) or (keyword in name)
+            self._sheet_table.setRowHidden(row, not visible)
+
+            cb = self._get_checkbox(row)
+            if cb is None:
+                continue
+            if not visible:
+                if cb.isChecked():
+                    cb.setChecked(False)
+                    self._filter_unchecked.add(row)
+            elif row in self._filter_unchecked:
+                cb.setChecked(True)
+                self._filter_unchecked.discard(row)
+        self._updating_header = False
+
+        self._anchor_row = -1   # 锚点行可能已被隐藏，跨隐藏行的区间勾选会误伤
+        self._update_header_check_state()
+
+    def _reset_filter(self):
+        """清空搜索框与取消清单，并取消所有行的隐藏（含把清单里的行勾回）。
+
+        表格重建（换文件 / 清除文件）时必须调用：否则新文件的 Sheet 列表会被上一个
+        文件的关键词静默过滤掉一批，看起来像「文件读出来少了」。
+        """
+        for row in self._filter_unchecked:
+            cb = self._get_checkbox(row)
+            if cb:
+                cb.setChecked(True)
+        self._filter_unchecked.clear()
+
+        self._filter_keyword = ""
+        self._search_edit.blockSignals(True)   # 避免 clear() 反过来触发一次过滤
+        self._search_edit.clear()
+        self._search_edit.blockSignals(False)
+
+        for row in range(self._sheet_table.rowCount()):
+            self._sheet_table.setRowHidden(row, False)
+        self._update_header_check_state()
+
+    def _visible_rows(self) -> list[int]:
+        """当前未被筛选隐藏的行号。
+
+        过滤只改显隐、不重排：行索引 ≡ self._sheets 索引 ≡ checkbox 的 row 属性，
+        因此 _get_selected_sheets / Shift 区间勾选 / _refresh_import_states 都不受影响。
+        """
+        return [
+            row for row in range(self._sheet_table.rowCount())
+            if not self._sheet_table.isRowHidden(row)
+        ]
+
+    def _is_row_checked(self, row: int) -> bool:
+        cb = self._get_checkbox(row)
+        return bool(cb and cb.isChecked())
+
     def _update_header_check_state(self):
-        """根据所有行 checkbox 的状态更新表头 checkbox。"""
+        """根据**可见行**的 checkbox 状态更新表头 checkbox（三态）与计数标签。
+
+        只统计可见行：筛选生效时隐藏行的勾选恒为取消（见 _apply_filter），
+        若把隐藏行也算进来，表头会在「部分可见行选中」时错误地显示为已全选。
+        """
         if self._updating_header:
             return
         self._updating_header = True
 
-        checked_count = 0
         total = self._sheet_table.rowCount()
-        for row in range(total):
-            cb = self._get_checkbox(row)
-            if cb and cb.isChecked():
-                checked_count += 1
+        visible = self._visible_rows()
+        checked_count = sum(1 for row in range(total) if self._is_row_checked(row))
+        checked_visible = sum(1 for row in visible if self._is_row_checked(row))
 
-        if total > 0 and checked_count == total:
-            self._header_cb.setChecked(True)
+        if visible and checked_visible == len(visible):
+            self._header_cb.setCheckState(Qt.CheckState.Checked)
+        elif checked_visible == 0:
+            self._header_cb.setCheckState(Qt.CheckState.Unchecked)
         else:
-            self._header_cb.setChecked(False)
+            self._header_cb.setCheckState(Qt.CheckState.PartiallyChecked)
 
-        self._count_label.setText(f"已选 {checked_count}/{total}")
+        text = f"已选 {checked_count}/{total}"
+        if self._filter_keyword:
+            text += " · 无匹配 Sheet" if not visible else f" · 显示 {len(visible)}"
+        self._count_label.setText(text)
 
         self._updating_header = False
 
@@ -487,13 +629,22 @@ class MainWindow(QMainWindow):
         if shift_held and self._anchor_row != -1 and row != self._anchor_row:
             self._set_range_checked(self._anchor_row, row, checked)
 
+        # 用户显式操作过该行：移出取消清单，系统不再自动勾回（清单只装「筛选造成」的取消）
+        self._filter_unchecked.discard(row)
+
         self._anchor_row = row
 
     def _set_range_checked(self, start: int, end: int, checked: bool):
-        """将 start..end 行的勾选状态统一设为 checked（Shift 范围勾选）。"""
+        """将 start..end 行的勾选状态统一设为 checked（Shift 范围勾选）。
+
+        跳过被筛选隐藏的行：它们已是未勾选状态，若一并勾上会与「隐藏即未勾选」
+        的不变式冲突，且用户看不见被殃及的行。
+        """
         lo, hi = min(start, end), max(start, end)
         self._updating_header = True
         for row in range(lo, hi + 1):
+            if self._sheet_table.isRowHidden(row):
+                continue
             cb = self._get_checkbox(row)
             if cb and cb.isChecked() != checked:
                 cb.setChecked(checked)
@@ -501,18 +652,27 @@ class MainWindow(QMainWindow):
         self._update_header_check_state()
 
     def _on_header_checkbox_clicked(self):
-        """全选 checkbox 被点击时，同步所有行 checkbox。"""
+        """全选 checkbox 被点击：只作用于**可见行**（反向切换）。
+
+        目标状态取「可见行是否已全勾」的相反数，而不是取 checkbox 自身状态的相反数：
+        三态下 Qt 会把 PartiallyChecked 循环成 Checked，按自身状态取反会得到相反结果。
+        改完立即重算显示状态，覆盖掉 Qt 那次循环的痕迹。
+        """
         if self._updating_header:
             return
 
         self._anchor_row = -1  # 全选操作后重置 Shift 锚点
-        all_checked = self._header_cb.isChecked()
+        visible = self._visible_rows()
+        all_checked = bool(visible) and all(self._is_row_checked(r) for r in visible)
+        target = not all_checked
+
         self._updating_header = True
-        for row in range(self._sheet_table.rowCount()):
+        for row in visible:
             cb = self._get_checkbox(row)
             if cb:
-                cb.setChecked(all_checked)
+                cb.setChecked(target)
         self._updating_header = False
+        self._update_header_check_state()
 
     def _refresh_import_states(self):
         """导入完成后刷新最后导入时间列与失败红标。"""
@@ -635,8 +795,17 @@ class MainWindow(QMainWindow):
         if not selected:
             return
 
-        # 确认对话框
-        confirm = ConfirmDialog("导入", selected, self._excel_path, self)
+        # 确认对话框：只选了部分表时加粗警示——未勾选的表不会被清空，
+        # 而是保持数据库中原有数据不变（搜索筛选会把隐藏行取消勾选，这是
+        # 「敲错一个关键词就静默漏导」的最后一道防线）
+        skipped = len(self._sheets) - len(selected)
+        warning = ""
+        if skipped > 0:
+            warning = (
+                f"本次只导入 {len(selected)}/{len(self._sheets)} 张表："
+                f"其余 {skipped} 张表不会被清空，将保持数据库中原有数据不变。"
+            )
+        confirm = ConfirmDialog("导入", selected, self._excel_path, self, warning=warning)
         confirm_result = confirm.exec()
         confirm.deleteLater()
         if confirm_result != ConfirmDialog.DialogCode.Accepted:
@@ -729,6 +898,10 @@ class MainWindow(QMainWindow):
         failed_names = set(local_db.get_failed_sheet_names())
         if not failed_names or self._sheet_table.rowCount() == 0:
             return
+
+        # 下面会按行显式改勾选状态：先清空搜索框，否则失败 Sheet 若被筛选隐藏，
+        # 用户看不见究竟被抓走了哪些行的勾选
+        self._reset_filter()
 
         hit_rows = []
         for row in range(self._sheet_table.rowCount()):

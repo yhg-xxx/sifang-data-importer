@@ -1,4 +1,11 @@
-"""数据库连接管理对话框 - 多连接管理"""
+"""数据库连接对话框 - 多连接管理
+
+两种入口共用本对话框，但「取消」的语义完全不同，故用 mode 区分：
+- "startup"：启动路径（main.py）。此时主窗口尚不存在，取消 = 关闭程序，
+  按钮文案因此是「退出」，标题「数据库连接」。
+- "switch" ：主窗口菜单「连接管理」。此时旧窗口与旧连接都还活着，
+  取消 = 什么都没发生（旧连接原样保留），按钮文案是「取消」。
+"""
 
 from PySide6.QtCore import QThread, Signal, Qt, QSize
 from PySide6.QtWidgets import (
@@ -21,6 +28,7 @@ from PySide6.QtWidgets import (
 from app import local_db
 from app import database as db_module
 from app.constants import ERROR_CONTACT
+from app.error_msgs import humanize_db_error
 from ui.toast import toast
 
 
@@ -113,11 +121,18 @@ class ConnectionRow(QWidget):
 
 
 class ConnectionDialog(QDialog):
-    """数据库连接管理对话框 - 支持多连接保存、切换、新增、删除。"""
+    """数据库连接管理对话框 - 支持多连接保存、切换、新增、删除。
 
-    def __init__(self, parent=None):
+    mode 取 "startup"（启动路径）或 "switch"（主窗口切换连接），
+    仅影响标题与取消按钮文案，见模块 docstring。
+    """
+
+    def __init__(self, parent=None, mode: str = "startup"):
         super().__init__(parent)
-        self.setWindowTitle("数据库连接管理")
+        self._mode = mode
+        self.setWindowTitle(
+            "数据库连接管理" if mode == "switch" else "数据库连接"
+        )
         self.setMinimumWidth(780)
         self.setMinimumHeight(480)
         self.setModal(True)
@@ -233,6 +248,12 @@ class ConnectionDialog(QDialog):
         btn_layout.addWidget(self._connect_btn)
 
         self._cancel_btn = QPushButton("取消")
+        if self._mode == "startup":
+            # 启动时无处可退，取消即关闭程序，文案写「退出」名实相符
+            self._cancel_btn.setText("退出")
+            self._cancel_btn.setToolTip("不连接数据库，关闭程序")
+        else:
+            self._cancel_btn.setToolTip("返回主窗口，当前连接保持不变")
         self._cancel_btn.clicked.connect(self.reject)
         btn_layout.addWidget(self._cancel_btn)
 
@@ -438,7 +459,7 @@ class ConnectionDialog(QDialog):
         self._test_btn.setText("测试连接")
         self._test_btn.setEnabled(True)
         self._connect_btn.setEnabled(True)
-        QMessageBox.warning(self, "连接失败", f"{msg}\n\n{ERROR_CONTACT}")
+        QMessageBox.warning(self, "连接失败", f"{humanize_db_error(msg)}\n\n{ERROR_CONTACT}")
 
     def _connect(self):
         self._start_worker(test_only=False)
@@ -473,8 +494,18 @@ class ConnectionDialog(QDialog):
         QMessageBox.critical(
             self,
             "连接失败",
-            f"{msg}\n\n{ERROR_CONTACT}",
+            f"{humanize_db_error(msg)}\n\n{ERROR_CONTACT}",
         )
+
+    @property
+    def blocks_quit(self) -> bool:
+        """托盘「退出」是否应被拒绝：仅连接测试进行中才算「任务」。
+
+        对话框空闲时放行托盘退出——它只是配置界面，不是导入/去重那类任务，
+        被拦下还谎报「有任务正在进行」属误导。连接测试运行中必须拦住：
+        线程随对话框析构会直接崩溃（同 reject/closeEvent 的拦截理由）。
+        """
+        return self._worker is not None
 
     @property
     def connection(self):

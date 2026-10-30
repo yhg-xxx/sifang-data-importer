@@ -12,17 +12,20 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import Qt
 
+from ui.theme import WARNING
+
 
 class ConfirmDialog(QDialog):
     """确认导入/验证的模态对话框，展示 sheet→表名映射。"""
 
     def __init__(self, action_label: str, selected_sheets: list[dict],
-                 filepath: str, parent=None):
+                 filepath: str, parent=None, warning: str = ""):
         """
         参数:
             action_label: "导入" 或 "验证"（用于标题和文案）
             selected_sheets: [{"sheet_name": str, "table_name": str}, ...]
             filepath: Excel 文件路径
+            warning: 可选的加粗警示文案（如「只导入部分表」的后果说明）
         """
         super().__init__(parent)
         self.setWindowTitle(f"确认{action_label}")
@@ -31,6 +34,7 @@ class ConfirmDialog(QDialog):
 
         self._action_label = action_label
         self._selected_sheets = selected_sheets
+        self._warning = warning
         self._confirmed = False
 
         self._setup_ui()
@@ -46,6 +50,13 @@ class ConfirmDialog(QDialog):
         )
         self._header_label.setObjectName("dialogTitle")
         layout.addWidget(self._header_label)
+
+        # ── 警示行（如「只导部分表」的后果，加粗比正文更醒目） ──
+        if self._warning:
+            warn_label = QLabel(self._warning)
+            warn_label.setWordWrap(True)
+            warn_label.setStyleSheet(f"color: {WARNING}; font-weight: 600;")
+            layout.addWidget(warn_label)
 
         # ── 表格（3列） ──
         columns = ["序号", "Sheet名称", "数据库表名"]
