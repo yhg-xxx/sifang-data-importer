@@ -1,6 +1,6 @@
 # 四方信息源入库
 
-> 将 Excel 文件中 40+ 个 sheet 的数据批量导入 SQL Server 的桌面工具。
+> 将 Excel 文件中 40+ 个 Sheet（当前 46 个）的数据批量导入 SQL Server 的桌面工具。
 
 ---
 
@@ -8,18 +8,24 @@
 
 ### 产品定位
 
-将 Excel 文件中 40+ 个 sheet 的数据批量导入 SQL Server 的桌面工具。每个 sheet 映射为一张表，每次导入全量覆盖（先删后插）。面向内部少量用户，启动后先填写数据库连接参数，连接成功后选择文件导入数据。
+将 Excel 文件中 40+ 个 Sheet 的数据批量导入 SQL Server 的桌面工具。每个 Sheet 映射为一张表，每次导入全量覆盖（先删后插）。面向内部少量用户：启动时后台自动尝试上次使用的连接（失败则打开连接管理），连接成功后选择文件、去重、导入。
 
 ### 项目文件说明
 
 | 文件 | 说明 |
 |---|---|
-| `信息源8.8_已去重.xlsx` | 数据源 Excel 文件，包含 46 个 sheet，每个 sheet 对应一个行业分类的企业数据（运行时由用户选择，不打包进 exe） |
+| `信息源*.xlsx` | 数据源 Excel 文件，当前 46 个 Sheet，每个 Sheet 对应一个行业分类的企业数据（运行时由用户选择，不打包进 exe） |
 | `数据规范.png` | 数据规范参考图（人工查看用，程序不引用） |
-| `sheet_names.txt` | 从数据源 Excel 提取的所有 sheet 名称列表，共 46 个（首次启动时自动播种到 SQLite） |
-| `local.db` | 本地 SQLite 数据库（首次启动自动生成），含 `db_connections`（连接配置/登录）、`sheet_names`（sheet→表名映射 + 导入状态）、`column_mapping`（Excel 列→DB 字段映射）、`dedup_settings`（去重模式与判重列）四张表 |
-| `create_all_tables.sql` | 46 张表的建表 DDL 脚本（GB2312 编码），表名 `enterprise_info_001~046`，结构参照已有表 |
-| `import_log.txt` | 运行时生成的导入日志（超过 1MB 自动轮转为 `import_log.txt.bak`） |
+| `每周入库流程.html` | 每周例行操作说明（人工查看用，程序不引用） |
+| `sheet_names.txt` | 初始 Sheet 名称列表，共 46 个（首次启动播种到 SQLite） |
+| `local.db` | 本地 SQLite（首次启动自动生成），含 `db_connections`（多连接配置 / 登录）、`sheet_names`（Sheet→表名映射 + 导入时间 + 失败状态）、`column_mapping`（Excel 列→DB 字段）、`dedup_settings`（去重模式与判重列）四张表 |
+| `create_all_tables.sql` | 46 张表的建表 DDL（GB2312 编码），表名 `enterprise_info_001~046` |
+| `import_log.txt` | 运行时生成的导入 / 去重日志（超过 1MB 自动轮转为 `.bak`） |
+| `assets/icon.png` | 托盘 / 窗口图标源文件（运行时居中裁方 + 圆角遮罩，多尺寸 16~256） |
+| `assets/icon.ico` | exe 文件图标（圆角多尺寸） |
+| `assets/icon_rounded_256.png` | 圆角图标预览图 |
+| `requirements.txt` | Python 依赖（PySide6 / python-calamine / pyodbc / PyInstaller / xlsxwriter） |
+| `build.spec` | PyInstaller 打包配置 |
 
 ---
 
@@ -27,25 +33,28 @@
 
 ### 功能清单
 
-- 启动后先填写数据库连接参数（服务器地址、数据库名、Schema、用户名、密码），测试连接成功后方可继续
-- 用户手动选择 .xlsx 文件，程序秒级读取全部 sheet 名称（zipfile 解析 `xl/workbook.xml`，不阻塞界面）
-- 导入前检查数据库中 46 张目标表（`enterprise_info_001~046`）是否全部存在，任一缺失则终止导入并弹窗提示
-- 按 sheet 名称匹配数据库表，数据批量写入 SQL Server（每批 5000 行，`fast_executemany`）
+- 启动后自动尝试上次使用的数据库连接（后台线程 + 「正在连接…」遮罩，不阻塞 GUI）；失败则打开连接管理对话框，可保存多条连接、新增 / 删除、测试连接，连接成功后方可进入主窗口
+- 用户手动选择 `.xlsx` 文件，程序后台线程秒级读取全部 Sheet 名称（zipfile 解析 `xl/workbook.xml`），概览显示序号、名称与最后导入时间；读取期间显示已用时
+- Sheet 概览默认全选，支持逐行勾选、先点起始行再 Shift 点击结束行批量勾选、底部「全选」一键切换，并显示「已选 X/Y」
+- 导出 / 验证前拦截两类映射问题：Sheet 在本地映射中缺失；多个 Sheet 映射到同一张表（同时导入会被后导入的覆盖）
+- 导入前检查本次勾选的表是否全部存在，任一缺失则终止并提示执行 `create_all_tables.sql`
+- 按 Sheet 名称匹配数据库表，批量写入 SQL Server（每批 5000 行，`fast_executemany`）
 - 每次导入逐表独立事务：先清空目标表（DELETE，兼容无 TRUNCATE 权限环境），再重新插入全部数据
-- 导入失败不中断：某 sheet 导入失败时仅回滚该表、自动跳过并继续导入后续表，全部表处理完后汇总「成功 X / 失败 Y」；仅连接断开等基础设施错误中止整个流程
-- 有失败表时自动在源文件同目录生成「源文件名__导入错误名单_时间戳.xlsx」（永不覆盖）：「汇总」页按负责人统计错误行数（可直接复制进群消息催办），「明细」页列出 Sheet、Excel 行号、列名、当前值、问题描述，可筛选
-- 失败表按表名持久化记忆（SQLite `sheet_names.last_import_status`）：主窗口概览中标红提示，加载新文件（如业务修正后的定稿文件）时自动提示「只勾选上次失败的 Sheet」一键补录
-- 每周例行流程使用内置去重（全局模式、判重列默认 D 企业名称），外部去重工具退役；「验证数据」保留为可选离线检查（不写库），不在每周例行流程中使用
-- 记录导入日志（开始时间、结束时间、各表行数、成功/部分成功/失败状态、失败表明细、错误名单路径），日志超 1MB 自动轮转
-- 所有错误统一弹窗提示，附带联系信息（集中在 `app/constants.py`）："发生错误，请联系世贸项目部-数据组-王霖霖，世贸项目部-数据组-张同宁"
-- 支持勾选部分 sheet 进行验证/导入（通过 SQLite `sheet_names` 表映射 sheet→表名）
-- 导入失败时自动逐行诊断，按错误类型分组输出，定位到具体 Sheet、Excel 行号、列名及单元格值，并记录原始数据库报错信息
-- 点击「验证数据」按钮可对 Excel 数据做离线校验（NOT NULL、字段长度、日期格式），一次性找出所有错误并展示，不写数据库；为可选排查工具，每周例行流程不使用
-- 点击「开始去重」可对勾选的 Sheet 去重（未勾选的 Sheet 原样复制进输出文件）：支持「按 Sheet 内去重 / 全局去重」两种模式切换与判重列下拉自选（默认 D 企业名称），设置持久化到本地 SQLite；输出为源文件的全格式保真副本（单元格样式、条件格式、列宽、超链接、自动筛选、保护等原样保留），仅删除重复行并紧凑重排行号
+- 导入失败不中断：某 Sheet 导入失败时仅回滚该表、自动跳过并继续导入后续表，全部表处理完后汇总「成功 X / 失败 Y」；仅连接断开等基础设施错误（`SELECT 1` 探活判定）中止整个流程
+- 导入内建逐批预检：NOT NULL（`company_name`、`industry`）、日期格式、字段长度；坏行在整个 Sheet 扫描完后判失败，批量插入失败时自动降级逐行诊断，定位到 Sheet、Excel 行号、列名与当前值
+- 有失败表时自动在源文件同目录生成「源文件名__导入错误名单_时间戳.xlsx」（永不覆盖）：「汇总」页按负责人统计错误行数与出错行区间（可直接复制进群催办），「明细」页列出 Sheet、Excel 行号、列名、当前值、问题描述、负责人，可筛选
+- 失败表按表名持久化记忆（`sheet_names.last_import_status`）：主窗口概览标红提示；加载新文件（如业务修正后的定稿文件）时自动提示「只勾选上次失败的 Sheet」一键补录
+- 每周例行流程使用内置去重（默认全局模式、判重列 D 企业名称），外部去重工具退役
+- 点击「开始去重」可对勾选的 Sheet 去重（未勾选的 Sheet 原样复制进输出文件）：支持「按 Sheet 内去重 / 全局去重」两种模式与判重列下拉自选，设置持久化到本地 SQLite
 - 判重键 = 判重列值去首尾空白并全角转半角；判重键为空或录入时间不可解析的行不参与判重、原样保留；同一判重键保留录入时间最早者（平手保留首次出现），整行删除其余重复行
-- 去重输出为源文件同目录「原名_已去重.xlsx」，永不覆盖任何已有文件：目标 xlsx 或重复清单 CSV 已存在（或与源文件同名，即对已去重文件再去重）时自动加时间戳（如「原名_已去重_20260905_153012.xlsx」，xlsx 与 CSV 配对同一时间戳，同秒冲突加计数后缀）；源文件名已带 `_已去重` 后缀或旧时间戳则先归一再重建、不叠加后缀；如有删除同时生成「重复清单__原名_已去重.csv」对照清单（UTF-8-SIG 长表：处理/Sheet名称/Excel行号/判重列原始值，同一保留行与其全部删除行相邻成组，保留/删除各自显示自己的原始值）
-- 去重成功后主窗口自动切换到输出文件，可直接点「开始导入」走现有流程入库；去重过程支持取消（取消作废整个输出文件，不自动切换文件）
-- 系统托盘驻留（`ui/tray.py`，QSystemTrayIcon）：图标优先加载 `assets/icon.png`（用户「四方」logo，运行时居中裁方 + 圆角遮罩，多尺寸 16~256；缺失时兜底 QPainter 画蓝底「四」字；PyInstaller 经 datas 打包、`sys._MEIPASS` 定位），exe 文件图标用 `assets/icon.ico`（圆角多尺寸，Pillow 从 logo 生成）；主窗口运行期间右下角显示图标；点 ✕ 关窗每次弹窗询问「直接退出（默认）/最小化到托盘」，选最小化则气泡提示去向，双击托盘图标恢复窗口，右键菜单「显示主窗口/退出」彻底退出；导入/去重/验证任务运行中拒绝退出并气泡提示；托盘不可用时退化为关窗即退出（不询问）
+- 去重输出为源文件的全格式保真副本（单元格样式、条件格式、列宽、超链接、自动筛选、保护等原样保留），仅删除重复行并紧凑重排行号；同时生成「重复清单__原名_已去重.csv」对照清单
+- 去重输出永不覆盖任何已有文件（目标已存在自动加时间戳）；中途取消作废整个输出文件；成功后主窗口自动切换到输出文件，可直接「开始导入」
+- 点击「验证数据」可做离线校验（NOT NULL、字段长度、日期格式），一次性找出所有错误并以可筛选表格展示，不写数据库；为可选排查工具，不在每周例行流程中
+- 数据库 / ODBC 原始报错经 `error_msgs.humanize_db_error` 翻译为中文提示；所有错误统一弹窗并附带联系信息（`ERROR_CONTACT`）
+- 记录导入 / 去重日志（开始 / 结束时间、状态、各表行数、失败表明细、错误名单路径），超 1MB 自动轮转，多实例写入加文件锁
+- 系统托盘驻留：关窗询问「直接退出（默认）/ 最小化到托盘」；托盘菜单「显示主窗口 / 退出」，双击图标恢复；任务运行中拒绝退出；托盘不可用时退化为关窗即退出
+- 统一亮色主题（`ui/theme.py`）与顶部居中堆叠的 Toast 轻提示（`ui/toast.py`）；内置「使用说明」窗口（目录胶囊跳转）
+- 支持「Sheet名-表映射」的增删改查、搜索筛选与批量替换；「列映射」只读展示 11 条约束
 - 打包为可运行的 .exe 文件
 
 ### 范围外功能（不做）
@@ -54,7 +63,7 @@
 - 不做用户登录验证和权限管理
 - 不做 Web 版本或 API
 - 不做数据报表或可视化
-- 不做 Excel → DB 的字段映射配置（按固定结构处理）
+- 不做 Excel → DB 字段映射的在线编辑（「列映射」只读展示，按固定结构处理）
 
 ---
 
@@ -64,70 +73,87 @@
 
 | 层 | 技术 |
 |---|---|
-| 语言 | Python 3.14（解释器：C:/Users/Administrator/Desktop/sifang/.venv/Scripts/python.exe） |
-| 桌面 GUI | PySide6（Qt for Python） |
-| Excel 读取 | python-calamine（Rust 解析器，数据读取）+ zipfile（sheet 名秒级解析） |
-| Excel 写出 | 去重输出：XML 手术（zipfile 逐条目复制 + worksheet XML 流式重写，全格式保真）；错误名单：xlsxwriter |
-| 远程数据库驱动 | pyodbc（SQL Server，ODBC Driver 17） |
-| 本地数据库 | SQLite（sqlite3 标准库），存储连接配置和 sheet 名称映射 |
-| 打包分发 | PyInstaller（单文件 exe） |
+| 语言 | Python 3.13+（当前开发环境 3.13.2） |
+| 桌面 GUI | PySide6 6.11.1（Qt for Python） |
+| Excel 读取 | python-calamine 0.8.2（Rust 解析器，数据读取）+ zipfile（Sheet 名与 XML 条目定位） |
+| Excel 写出 | 去重输出：XML 手术（zipfile 逐条目复制 + worksheet XML 流式重写，全格式保真）；错误名单：xlsxwriter 3.2.9 |
+| 远程数据库驱动 | pyodbc 5.3.0（SQL Server，ODBC Driver 17） |
+| 本地数据库 | SQLite（sqlite3 标准库），存储连接配置、映射、列映射与去重设置 |
+| 打包分发 | PyInstaller 6.21.0（单文件 exe，windowed） |
 
 ### 目录结构
 
 ```
-sifang/
-├── main.py                      # 应用入口
+sifang-data-importer/
+├── main.py                      # 应用入口：本地库初始化、主题、托盘、自动连接、连接管理循环
 ├── app/                         # 业务逻辑层
 │   ├── __init__.py
-│   ├── config.py                # 配置管理（从本地 SQLite 读写连接参数，替代 config.ini）
+│   ├── config.py                # 连接配置读写（转调 local_db）
 │   ├── constants.py             # 全局常量（统一错误联系信息 ERROR_CONTACT）
-│   ├── local_db.py              # 本地 SQLite 数据库管理（建表、迁移、播种、CRUD）
-│   ├── database.py              # 数据库连接、表检查、批量插入、COUNT(*) 查询（全部带 schema 支持）
-│   ├── dedup.py                 # 数据去重（calamine 流式扫描定保留行 + xlsx_surgery XML 手术写出，全格式保真）
-│   ├── xlsx_surgery.py          # xlsx XML 手术引擎（zip 逐条目复制 + worksheet XML 行级删行/重排 + 合并单元格/数据验证/超链接/筛选范围修正，样式/条件格式原样保留）
-│   ├── error_list.py            # 导入错误名单生成（失败表结构化错误 → 汇总/明细双 sheet xlsx，永不覆盖）
-│   ├── date_utils.py            # 日期解析工具（验证与导入共用同一套格式与归一化逻辑）
-│   ├── excel_reader.py          # Excel 文件读取（zipfile 读 sheet 名 + python-calamine 读数据）
-│   ├── importer.py              # 导入编排器（协调 database + excel_reader）
-│   ├── validator.py             # 数据验证（NOT NULL、长度、日期格式离线校验）
-│   ├── utils.py                 # 通用工具（col_letter 列号转字母、normalize_dedup_key 判重键规范化）
-│   └── logger.py                # 日志记录（import_log.txt，1MB 轮转，多实例文件锁）
+│   ├── local_db.py              # 本地 SQLite（建表、迁移、播种、连接/映射/设置的 CRUD）
+│   ├── database.py              # SQL Server 连接、表检查、批量插入、批量 COUNT、清空
+│   ├── dedup.py                 # 数据去重（扫描定保留行 + XML 手术写出 + 重复清单 CSV）
+│   ├── xlsx_surgery.py          # xlsx XML 手术引擎（行级删行/重排 + 尾部引用修正）
+│   ├── error_list.py            # 导入错误名单生成（汇总 + 明细双 Sheet xlsx）
+│   ├── error_msgs.py            # 数据库 / ODBC 报错中文化
+│   ├── date_utils.py            # 日期归一化与解析（验证与导入共用）
+│   ├── excel_reader.py          # zipfile 读 Sheet 名 + calamine 流式分批读数据
+│   ├── importer.py              # 导入编排器（逐表事务、预检、错误收集、名单与日志）
+│   ├── validator.py             # 离线数据验证（NOT NULL、长度、日期）
+│   ├── utils.py                 # 列字母、行号区间合并、判重键规范化、时间戳命名
+│   └── logger.py                # 导入 / 去重日志（1MB 轮转、多实例文件锁）
 ├── ui/                          # 界面层（PySide6）
 │   ├── __init__.py
-│   ├── main_window.py           # 主窗口：文件选择、Sheet 概览（勾选框+最后导入时间）、验证/导入入口
-│   ├── base_task_dialog.py      # 任务进度对话框基类（进度条、状态、已用时、日志区、关闭按钮）
-│   ├── connection_dialog.py     # 数据库连接对话框（服务器/库名/Schema/用户名/密码）
-│   ├── import_dialog.py         # 导入进度/结果展示（继承 BaseTaskDialog）
-│   ├── validate_dialog.py       # 验证数据进度/结果展示（继承 BaseTaskDialog）
-│   ├── dedup_settings_dialog.py # 去重设置对话框（模式/判重列下拉，摘要兼作确认，设置持久化）
-│   ├── dedup_dialog.py          # 去重进度/结果展示（继承 BaseTaskDialog，支持取消）
-│   ├── confirm_dialog.py        # 确认对话框（展示选中 sheet→表名映射）
-│   ├── sheet_directory_dialog.py # Sheet名-表映射对话框（支持增删改查、筛选）
-│   ├── column_mapping_dialog.py  # 列映射对话框（含约束说明）
-│   └── tray.py                   # 系统托盘图标（QSystemTrayIcon：显示/退出菜单、气泡提示、程序绘制图标）
-├── local.db                     # 运行时生成的本地 SQLite 数据库（与 exe 同目录）
+│   ├── main_window.py           # 主窗口：文件选择、Sheet 概览、失败红标、去重/验证/导入入口
+│   ├── base_task_dialog.py      # 任务进度对话框基类
+│   ├── connection_dialog.py     # 数据库连接管理（多连接列表、测试/连接）
+│   ├── import_dialog.py         # 导入进度/结果（含「打开错误名单」）
+│   ├── validate_dialog.py       # 验证进度/结果（错误表格 + 类型筛选）
+│   ├── dedup_settings_dialog.py # 去重设置（模式/判重列，摘要兼确认）
+│   ├── dedup_dialog.py          # 去重进度/结果（支持取消）
+│   ├── confirm_dialog.py        # 导入/验证前的映射确认
+│   ├── sheet_directory_dialog.py# Sheet名-表映射管理（搜索/编辑/新增/删除/批量替换）
+│   ├── column_mapping_dialog.py # 列映射只读展示
+│   ├── help_dialog.py           # 使用说明窗口（目录胶囊跳转）
+│   ├── help_content.py          # 使用说明正文（HTML）
+│   ├── theme.py                 # 全局亮色主题 QSS
+│   ├── toast.py                 # 顶部居中堆叠的非阻塞轻提示
+│   └── tray.py                  # 系统托盘图标与菜单
+├── assets/                      # 图标资源（icon.png / icon.ico / icon_rounded_256.png）
+├── local.db                     # 运行时生成的本地 SQLite（与 exe 同目录）
 ├── import_log.txt               # 运行时生成的导入日志
+├── sheet_names.txt              # 初始 Sheet 名列表（首次启动播种）
+├── create_all_tables.sql        # 目标表建表 DDL
 ├── requirements.txt
 └── build.spec                   # PyInstaller 打包配置
 ```
 
 ### 各层职责
 
+**入口（`main.py`）**
+
+| 职责 |
+|---|
+| 注册全局 `sys.excepthook`（主线程弹统一错误框，工作线程只落日志，避免跨线程操作控件）；设置 Windows AppUserModelID；应用主题；创建托盘；`init_db()` 失败时弹框后退出；后台线程自动连接上次使用的库；主窗口关闭后可循环进入连接管理（「连接管理」切换连接不自动重连） |
+
 **UI 层（`ui/`）**
 
 | 模块 | 职责 |
 |---|---|
-| `main_window.py` | 主窗口：文件选择（后台线程读取、显示读取用时）、Sheet 概览（勾选框 + 序号 + Sheet名称 + 最后导入时间、失败 Sheet 红标）、失败 Sheet 一键补录提示、全选 checkbox、验证/导入操作入口、菜单栏（Sheet名-表映射/列映射/使用说明） |
-| `base_task_dialog.py` | 任务进度对话框基类：进度条、状态文字、已用时间、日志区、关闭按钮；子类实现 `_run_worker()` / `_on_finished()` |
-| `connection_dialog.py` | 启动时弹出，填写服务器/库名/Schema/用户名/密码，后台线程测试连接，成功后保存配置并返回 `connection` 与 `schema` |
-| `import_dialog.py` | 继承 BaseTaskDialog；工作线程内独立创建 pyodbc 连接（避免跨线程共享）；失败自动跳过后展示「成功 X / 失败 Y」与失败表明细，注入「打开错误名单」按钮；部分成功时对成功表批量 `SELECT COUNT(*)`（UNION ALL）查询数据库实际行数 |
-| `validate_dialog.py` | 继承 BaseTaskDialog；展示数据验证进度条和结果日志 |
-| `dedup_settings_dialog.py` | 去重设置对话框：去重模式单选（按 Sheet 内/全局）、判重列下拉（11 条列映射 + 固定追加「L 匹配类型」）、摘要说明兼作去重前确认；确认时保存设置到 SQLite |
-| `dedup_dialog.py` | 继承 BaseTaskDialog；展示去重进度与逐 Sheet 结果表（处理方式/总行数/删除/保留），经基类 `_add_extra_buttons` 钩子注入「取消」按钮；`dedup_result` 属性供主窗口判断是否自动切换文件 |
-| `confirm_dialog.py` | 确认对话框：展示选中 sheet→表名映射（3 列），用户确认后执行操作 |
-| `sheet_directory_dialog.py` | Sheet名-表映射对话框：展示全部 sheet→表名映射（含最后导入时间），支持搜索筛选（防抖）、双击编辑、新增、右键删除 |
-| `column_mapping_dialog.py` | 列映射对话框：展示 Excel 列→数据库字段映射（序号、Excel列、数据库字段、Excel索引、说明、约束说明） |
-| `tray.py` | 系统托盘：`TrayController` 封装 QSystemTrayIcon（「显示主窗口/退出」菜单、双击恢复、最小化/忙碌气泡提示），`create_tray_icon()` 优先加载 assets/icon.png（圆角遮罩多尺寸），缺失时兜底画「四」字 |
+| `main_window.py` | 文件选择（后台读取 + 读取计时 + Toast）、Sheet 概览（勾选 / 序号 / 名称 / 最后导入时间，失败 Sheet 红标 + tooltip）、Shift 区间勾选与全选、映射缺失 / 同表冲突拦截、去重/验证/导入入口、失败 Sheet 一键补录提示、菜单栏（连接管理 `Ctrl+Shift+C` / Sheet名-表映射 `Ctrl+N` / 列映射 / 使用说明）、关窗托盘询问、状态栏连接信息 |
+| `base_task_dialog.py` | 任务进度对话框基类：进度条（支持不确定模式）、状态文字、已用时、日志区、关闭按钮；运行中拦截 `reject`/`closeEvent`；`_add_extra_buttons` 钩子供子类注入按钮；关闭按钮在线程真正退出后才启用 |
+| `connection_dialog.py` | 连接管理：左侧已保存连接列表（连接名 + 服务器·数据库副标题 + 「最近使用」标签），右侧表单（连接名称/服务器/数据库/Schema/用户名/密码 + 密码显隐）；新增 / 删除；后台线程测试或连接；防重入与关闭拦截；连接成功后保存配置并返回连接信息 |
+| `import_dialog.py` | 继承 BaseTaskDialog；工作线程内用主窗口传入的本次会话连接参数快照独立建连；单 Sheet 导入改不确定进度；失败自动跳过后展示「成功 X / 失败 Y」与失败明细（报错经中文化）；注入「打开错误名单」按钮；对成功表批量 `SELECT COUNT(*)` 刷新实际行数 |
+| `validate_dialog.py` | 继承 BaseTaskDialog；错误结果表格（序号/Sheet/行号/字段/当前值/原因），连续出错行折叠为区间，类型下拉筛选，行高随内容撑开；整体失败（文件损坏等）走独立提示 |
+| `dedup_settings_dialog.py` | 去重模式单选（按 Sheet 内 / 全局）、判重列下拉（11 条列映射 + 固定追加「L 匹配类型」）；摘要说明兼作去重前确认；确认时保存设置到 SQLite |
+| `dedup_dialog.py` | 继承 BaseTaskDialog；逐 Sheet 结果表（处理方式/总行数/删除/保留）；经基类钩子注入「取消」按钮；`dedup_result` 供主窗口判断是否自动切换文件 |
+| `confirm_dialog.py` | 导入 / 验证前的确认对话框：展示选中 Sheet→表名映射（序号、Sheet名称、数据库表名） |
+| `sheet_directory_dialog.py` | Sheet名-表映射：搜索筛选（200ms 防抖）、双击编辑（回车即保存并 Toast 提示「列名: 旧值 → 新值」）、右上「新增」、右键删除（弹窗确认）、「替换为 + 替换全部」在筛选结果内批量替换 |
+| `column_mapping_dialog.py` | 列映射只读展示（序号、Excel列、数据库字段、Excel索引、说明、约束说明） |
+| `help_dialog.py` / `help_content.py` | 非模态使用说明：顶部目录胶囊（使用流程/菜单功能/注意事项/联系信息）跳转锚点；正文 HTML 由 `help_content.build_help_html()` 生成 |
+| `theme.py` | 全局亮色 QSS：白底 + 蓝色主色 + 圆角卡片；约定 `class="primary"`、`secondary=True`、`card`、`innerTable`；`apply_theme()` 设 Fusion 风格与调色板 |
+| `toast.py` | 仿 Element Plus 的非阻塞轻提示：父窗口顶部居中、多条向下堆叠、淡入 + 下滑、自动淡出；四种类型 success/error/warning/info |
+| `tray.py` | 系统托盘：`TrayController` 封装 QSystemTrayIcon（「显示主窗口/退出」菜单、双击恢复、最小化/忙碌气泡提示）；`create_tray_icon()` 优先加载 `assets/icon.png` 并圆角遮罩多尺寸，缺失时返回空图标 |
 
 **业务逻辑层（`app/`）**
 
@@ -135,68 +161,61 @@ sifang/
 |---|---|
 | `constants.py` | 全局常量：`ERROR_CONTACT` 统一错误联系信息 |
 | `config.py` | 封装 `local_db` 的连接读写接口，`load_config()` / `save_config()` 对外透明 |
-| `local_db.py` | 本地 SQLite 数据库管理：`db_connections` 表（连接配置 + `schema_name` + `is_last_used`）、`sheet_names` 表（sheet→table_name 映射，含 `last_import_time` 与 `last_import_status` 导入状态）、`column_mapping` 表（Excel 列→DB 字段，含 `constraint_desc` 约束说明）、`dedup_settings` 表（key-value，去重模式与判重列，默认全局去重）；`init_db()` 首次建表并播种，自动迁移新增列并回填约束说明；CRUD：`add_sheet_mapping()` / `update_sheet_mapping()` / `delete_sheet_mapping()` / `update_import_result()` / `get_failed_sheet_names()` / `get_dedup_settings()` / `save_dedup_settings()` |
-| `database.py` | `connect()`（ODBC 连接串值花括号转义）/ `test_connection()` / `check_tables_exist()`（单次 IN 查询）/ `delete_all_tables()`（DELETE 清空，兼容无 TRUNCATE 权限）/ `insert_batch()`（fast_executemany）/ `count_tables_rows_batch()`（UNION ALL 批量 COUNT）；所有 SQL 均带 schema 前缀并转义标识符 |
-| `dedup.py` | 数据去重：`run_dedup()` calamine 单遍流式扫描定保留行（不缓存行数据）+ `xlsx_surgery.rewrite_workbook` XML 手术写出全保真输出（重复行在 XML 行级重写时根本不写入，结构上不存在「残留删不净」）；判重键经 `utils.normalize_dedup_key` 规范化（文本日期解析记忆化+原始值字符串驻留），空键不判重；未勾选 Sheet 字节级原样搬运；进度三段单调（扫描→校验→写出）不回跳；PanicException 等非 Exception 错误同样收敛进 error 字段；输出 `原名_已去重.xlsx` 与 `重复清单__原名….csv` 保留/删除对照清单（长表，`_write_duplicates_csv`），`_resolve_output_paths` 目标已存在时整体加时间戳、永不覆盖任何已有文件；中途取消作废整个输出；返回 dict 契约同 `importer.run_import` |
-| `xlsx_surgery.py` | XML 手术引擎：`sheet_xml_entries()` 复用 `excel_reader.read_sheet_entries`（ElementTree，与主窗口 sheet 名列表同一解析）解析 sheet 名→zip 条目映射；`rewrite_workbook()` 输出 = 源 zip 逐条目复制，勾选去重的 worksheet XML 两读一写（MODE_SCAN 预扫描校验对齐+拒止共享公式 → MODE_SURGERY 删行+行号紧凑重排+dimension/autoFilter/合并单元格/数据验证 sqref/超链接修正，含被删行的合并单元格剔除），未勾选 sheet 预扫描计数后纯字节泵搬运；取消用单一公开 `Cancelled` 异常贯穿预扫描/条目/行三层检查点（携带已完成 stats）；行号对齐依据（实测）：calamine 产出第 1 行~最后含 `<v>/<is>` 值行的全部行号（按 `r` 属性对齐、缺行补空、尾部截断），删除集行号即 r 属性值；对齐不一致立即报错作废，绝不带错删行 |
-| `utils.py` | 通用工具：`col_letter()` 列号转字母；`normalize_dedup_key()` 判重键规范化（strip + 全角 ASCII U+FF01-FF5E 与全角空格 U+3000 转半角） |
-| `date_utils.py` | 日期解析：`DATE_FORMATS`（5 种格式）、`normalize_date_str()`（`/`→`-`、`.`→`:`、全角冒号→半角）、`parse_date()` 统一转为纯 `datetime.date` |
-| `excel_reader.py` | `read_sheets()` 用 zipfile 解析 workbook.xml 秒级读取全部 sheet 名；`iter_sheet_rows_from_workbook()` 从已打开的 workbook 流式读取（跳过表头、跳过空行、截断到 11 列），返回 `(批次起始行号, [(实际Excel行号, 行数据)])` |
-| `importer.py` | 编排导入流程：检查表 → 逐表（DELETE 清空 → 流式批量插入 → 提交）→ 更新导入状态；某表数据错误仅回滚该表、记录失败并**继续后续表**，连接级错误（`SELECT 1` 探活失败）才中止全程；`_row_to_dict()` 将 Excel 行转为数据库字段 dict（collected_at 走 `date_utils`，nullable 空值转 `""`）；`_diagnose_batch()` 批量失败时逐行定位；行级错误收集为结构化 dict（row/message/kind/fields/values），日志文本与错误名单 xlsx 同源；`_format_sheet_errors()` 按错误类型分组输出 |
-| `error_list.py` | 导入错误名单生成：`generate_error_list()` 把失败表的结构化错误写成「源文件名__导入错误名单_时间戳.xlsx」（同秒冲突加 `_2` 计数，永不覆盖）：「汇总」sheet 按负责人聚合（可直接复制进群催办），「明细」sheet 行级错误（Sheet/Excel行号/列名/当前值/问题描述/负责人，带 autofilter）；无行级错误的整表失败合成一条明细保证可见 |
-| `validator.py` | Python 离线数据验证：`FIELD_CONSTRAINTS` 定义约束（与 DDL 一致），按行校验 NOT NULL、nvarchar 长度、date 格式（复用 `date_utils` 与 `importer._row_to_dict`），一次性收集选中 sheet 的所有错误 |
-| `logger.py` | 记录导入/去重日志（开始/结束时间、状态含「部分成功（成功 X / 失败 Y）」、各表行数、失败表明细、错误名单路径），超 1MB 轮转为 `.bak`，msvcrt 文件锁避免多实例交错写入 |
+| `local_db.py` | 本地 SQLite 管理：`db_connections`（多连接 + `schema_name` + `is_last_used`，按 server+database 复用记录）、`sheet_names`（Sheet→表名 + `last_import_time` + `last_import_status`）、`column_mapping`（列映射 + `constraint_desc`）、`dedup_settings`（key-value，默认全局去重 / D 列）；`init_db()` 建表、迁移新增列并回填约束说明与连接名，从 `sheet_names.txt` 播种；CRUD 含 `get_all_connections()` / `get_last_connection()` / `save_connection()` / `delete_connection()` / `add_sheet_mapping()` / `update_sheet_mapping()` / `delete_sheet_mapping()` / `update_import_result()` / `get_failed_sheet_names()` / `get_dedup_settings()` / `save_dedup_settings()` |
+| `database.py` | `connect()`（ODBC 连接串值花括号转义，登录超时 10s，查询超时 300s）/ `test_connection()` / `check_tables_exist()`（单次 IN 查询）/ `delete_all_tables()`（DELETE 清空）/ `insert_batch()`（fast_executemany）/ `count_tables_rows_batch()`（UNION ALL 批量 COUNT）；所有 SQL 带 schema 前缀并转义标识符 |
+| `dedup.py` | 数据去重：calamine 单遍流式扫描定保留行（不缓存行数据，日期解析记忆化、字符串驻留）+ `xlsx_surgery.rewrite_workbook` 全保真写出；判重键经 `utils.normalize_dedup_key` 规范化，空键 / 空时间不判重；未勾选 Sheet 字节级搬运；进度三段单调（扫描→校验→写出）；输出 `原名_已去重.xlsx` 与 `重复清单__原名….csv`（长表：处理/Sheet名称/Excel行号/判重列原始值/录入时间），`_resolve_output_paths` 永不覆盖已有文件；取消作废整个输出；PanicException 等非 Exception 错误同样收敛进 `error` 字段；返回 dict 契约与 `importer.run_import` 一致 |
+| `xlsx_surgery.py` | XML 手术引擎：`sheet_xml_entries()` 复用 `excel_reader.read_sheet_entries` 建立 Sheet 名→zip 条目映射；`rewrite_workbook()` 输出 = 源 zip 逐条目复制，勾选去重的 worksheet XML 两读一写（MODE_SCAN 预扫描校验行号对齐并拒止共享公式 → MODE_SURGERY 删行 + 行号紧凑重排 + dimension/autoFilter/合并单元格/数据验证 sqref/超链接修正，含被删行的合并单元格剔除）；未勾选 sheet 预扫描计数后纯字节泵搬运；取消用单一公开 `Cancelled` 异常贯穿三层检查点 |
+| `error_list.py` | 错误名单生成：`generate_error_list()` 把失败表的结构化错误写成「源文件名__导入错误名单_时间戳.xlsx」（同秒冲突加 `_2`，永不覆盖）；「汇总」按 (负责人, Sheet) 聚合错误行数、出错行区间、主要问题；「明细」为行级错误（含 autofilter）；无行级错误的整表失败合成一条明细 |
+| `error_msgs.py` | `humanize_db_error()`：把 ODBC 错误码（22018、HY000、HY010、08S01 等）与「截断/空值」等常见报错翻译为中文；已是中文的错误原样返回 |
+| `date_utils.py` | `DATE_FORMATS`（5 种格式）、`normalize_date_str()`（NFKC 全角转半角，日期段 `/`、`.` → `-`，时间段 `.`、全角冒号 → `:`）、`parse_date()` 统一返回纯 `datetime.date` |
+| `excel_reader.py` | `read_sheet_entries()` / `read_sheets()` 用 zipfile + ElementTree 解析 `xl/workbook.xml`；`iter_sheet_rows_from_workbook()` 从已打开的 workbook 流式读取（跳过表头、跳过空行、截断到 11 列），返回 `(批次起始行号, [(实际Excel行号, 行数据)])` |
+| `importer.py` | 编排导入：检查勾选表 → 逐表（DELETE → 流式预检 + 批量插入 → 提交）→ 更新导入状态；某表数据错误仅回滚该表、记录失败并继续后续表，连接级错误中止全程；`_row_to_dict()` 转字段 dict（collected_at 走 `date_utils`，nullable 空值转 `""`）；批量失败 `_diagnose_batch()` 逐行定位；结构化错误（row/message/kind/fields/values）同时供日志与错误名单；有失败表自动生成名单；结果统一 dict |
+| `validator.py` | 离线验证：`FIELD_CONSTRAINTS`（2 个 NOT NULL + 9 个长度限制 + 1 个日期校验，与 DDL 一致），复用 `date_utils` 与 `importer._row_to_dict`，一次性收集选中 Sheet 全部错误 |
+| `utils.py` | `col_letter()`；`merge_row_ranges()` 行号合并为连续区间；`normalize_dedup_key()`（strip + 全角 ASCII / 全角空格转半角）；`timestamped_output_candidates()` 永不覆盖的时间戳候选路径 |
+| `logger.py` | 导入 / 去重日志：开始 / 结束时间、状态（含「部分成功（成功 X / 失败 Y）」）、各表行数、失败表明细、错误名单路径、去重逐 Sheet 统计；超 1MB 轮转为 `.bak`；msvcrt 文件锁；`log_uncaught()` 记录未捕获异常 |
 
 ### 核心数据流
 
 ```
-启动 → 连接对话框（自动填充上次配置，含 Schema）
-  ↓ 测试连接成功
-主窗口
-  ↓ 用户选择 .xlsx 文件（后台线程 zipfile 秒级读取 sheet 名，显示读取用时）
-显示 sheet 概览（勾选框 + 序号 + Sheet名称 + 最后导入时间，默认全选）
-  ├─→ 勾选 sheet → 点击"开始去重" → 去重设置对话框（模式/判重列，兼作确认）
-  │      → calamine 单遍流式扫描定保留行（空键/坏时间保留、同键保留录入时间最早）
-  │      → XML 手术写出全格式保真副本（未勾选的 Sheet 字节级原样搬运）
-  │      写出「原名_已去重.xlsx」（目标已存在自动加时间戳）+（如有删除）「重复清单__原名_已去重.csv」→ 记录日志
-  │        ↓ 成功（中途取消作废整个输出、不切换文件）
-  │      主窗口自动切换到输出文件（重建勾选为全选）→ 直接点"开始导入"入库
-  ├─→ 勾选 sheet → 点击"验证数据" → 确认对话框（显示映射） → Python 离线校验选中 sheet（可选，排查用，不在每周例行流程中）
-  └─→ 勾选 sheet → 点击"开始导入" → 确认对话框（显示映射） → 检查选中表是否存在 → 任一缺失则终止
-         ↓ 全部存在
-       工作线程内独立建连 → 逐表：BEGIN → DELETE → 批量 INSERT → COMMIT → 写入导入状态（成功）
-         ↓（某表数据错误：仅该表回滚、记入失败表、继续下一表；连接级错误才中止全程）
-       汇总「成功 X / 失败 Y」→ 有失败表时自动生成错误名单 xlsx（汇总+明细双 sheet）
-         ↓ 成功或部分成功
-       批量 SELECT COUNT(*)（UNION ALL）查询成功表实际行数
-         ↓
-       记录 import_log.txt → 主窗口刷新最后导入时间与失败红标
-         ↓ 业务按名单修正后重新选择定稿文件
-       加载文件时检测到失败 Sheet → 提示"只勾选上次失败的 Sheet" → 一键补录 → 状态翻正、红标消除
+启动 → 自动尝试上次使用的连接（后台线程 + 遮罩）
+  ├─ 成功 → 主窗口
+  └─ 失败 → 连接管理对话框（多连接新增/删除/测试/连接）
+              ↓ 连接成功
+            主窗口（运行中切换连接会回到连接管理）
+  ↓ 用户选择 .xlsx（后台 zipfile 秒级读 Sheet 名，显示读取用时）
+Sheet 概览（勾选 + 序号 + 名称 + 最后导入时间，默认全选；Shift 区间勾选）
+  ├─→ 点「开始去重」→ 去重设置（模式/判重列，摘要兼确认）
+  │     → calamine 扫描定保留行（空键/坏时间保留、同键保留录入时间最早）
+  │     → XML 手术写出全格式保真副本（未勾选 Sheet 字节级搬运）
+  │     → 输出「原名_已去重.xlsx」+（如有删除）「重复清单__原名….csv」→ 记录日志
+  │       ↓ 成功（取消则作废输出、不切换）
+  │     主窗口自动切换到输出文件（重建勾选为全选）→ 直接「开始导入」
+  ├─→ 点「验证数据」→ 确认映射 → 离线校验选中 Sheet（可选排查，不写库）
+  └─→ 点「开始导入」→ 确认映射 → 检查勾选表存在（缺失即终止）
+        ↓ 全部存在
+      工作线程独立建连 → 逐表：BEGIN → DELETE → 批量预检 + INSERT → COMMIT → 写导入状态
+        ↓（某表错误：仅该表回滚、记入失败、继续下一表；连接级错误才中止全程）
+      汇总「成功 X / 失败 Y」→ 有失败表自动生成错误名单（汇总 + 明细）
+        ↓ 成功或部分成功
+      批量 SELECT COUNT(*)（UNION ALL）查询成功表实际行数
+        ↓
+      记录 import_log.txt → 主窗口刷新最后导入时间与失败红标
+        ↓ 业务按名单修正后重新选择定稿文件
+      检测到失败 Sheet → 提示「只勾选上次失败的 Sheet」→ 一键补录 → 状态翻正、红标消除
 ```
 
 ### 关键设计决策
 
-1. **扁平模块而非框架化**：面向少量内部用户，不引入 MVC/MVVM 等框架，够用即可
-2. **`importer.py` 作为编排器**：不把导入逻辑写在 UI 层，保持 UI 只做展示和交互
-3. **逐表独立事务 + 失败继续**：每个表独立 `BEGIN TRANSACTION` → `DELETE` → `INSERT` → `COMMIT`。某表数据错误时仅该表回滚、记录失败并**继续导入后续表**（历史上的行为是首个失败即整体中止，导致 8.24 式连导四次）；仅连接断开等基础设施错误（`_connection_alive` 用 `SELECT 1` 探活判定）中止整个流程，中止前已提交的表保留
-4. **DELETE 而非 TRUNCATE**：清空目标表使用 `DELETE FROM`，兼容无 TRUNCATE 权限的数据库账号
-5. **本地 SQLite 替代 config.ini**：`local.db` 与 exe 同目录，含 `db_connections` 表（连接配置 + 登录自动填充，`schema_name` 与 `is_last_used` 标记上次连接）、`sheet_names` 表（46 条 sheet→table_name 映射 + `last_import_time`）、`column_mapping` 表（列映射 + `constraint_desc` 约束说明）、`dedup_settings` 表（去重模式与判重列），首次启动自动建表、迁移新增列并从 `sheet_names.txt` 播种
-6. **错误集中处理**：联系信息集中在 `app/constants.py` 的 `ERROR_CONTACT`，所有异常向上抛到 UI 层统一弹窗；`main.py` 注册全局 `sys.excepthook` 兜底
-7. **单元格级错误诊断**：批量插入失败时自动降级为逐行重试，按数据库错误类型分组输出全部出错行号与列值样例，定位到具体 Sheet、Excel 行号和列名，便于快速排查数据质量问题
-8. **Python 离线验证优于 DB 验证**：约束简单（2 个 NOT NULL + 8 个长度限制 + 1 个日期校验），纯内存操作速度快，可一次性收集全部 sheet 的所有错误，无需数据库连接；验证与导入共用 `date_utils` 的日期解析，保证两边判断一致
-9. **导入后 SQL COUNT(*) 核实行数**：导入流程不在内存中计算行数，而是在事务提交后通过批量 `SELECT COUNT(*)`（UNION ALL 合并单次往返）查询数据库实际行数并展示，确保数据准确
-10. **确认对话框不含行数统计**：确认对话框中仅展示 sheet→表名映射（3 列），不预先计算行数，确认按钮立即可用，无需等待
-11. **Excel 文件与 SQL 查询的性能优化**：导入/验证全程只打开一次 workbook 复用；sheet 名用 zipfile 秒级解析；column_mapping 结果模块级缓存；表存在性检查与导入后 COUNT(*) 均合并为单次批量 SQL 查询，大幅减少网络往返
-12. **`BaseTaskDialog` 统一任务展示**：导入/验证对话框继承同一基类（进度条、状态、已用时、日志区），UI 逻辑不复用不重复
-13. **Schema 支持**：连接对话框新增 Schema 字段，`db_connections` 表存储 `schema_name`，所有 SQL 均带 schema 前缀；标识符与 ODBC 连接串值统一转义（方括号 / 花括号），避免特殊字符破坏 SQL 与连接串
-14. **pyodbc 线程安全**：连接非线程安全，工作线程内独立创建连接，避免跨线程共享导致 HY010"函数序列错误"；每批插入使用独立 cursor，避免批量失败后 cursor 状态损坏影响后续批次
-15. **日期解析统一**：日期归一化（`/`→`-`、`.`→`:`、全角冒号→半角）与 5 种格式解析收敛到 `date_utils.parse_date()`，导入与验证共用，避免 SQL Server「日期时间字段溢出」错误
-16. **日志轮转与并发安全**：导入日志超 1MB 自动归档为 `.bak`，写入时用 msvcrt 文件锁，避免多实例交错写入
-17. **去重用 XML 手术重写而非全新写文件（全格式保真）**：去重不复用导入的行迭代（导入截断 11 列且跳空行，去重需全列保真）；输出 = 源 zip 逐条目复制 + 勾选 sheet 的 worksheet XML 行级重写（删重复行、行号紧凑重排、dimension/autoFilter/合并单元格/数据验证 sqref/超链接引用同步修正；范围内含被删行的合并单元格直接剔除，含共享公式的 Sheet 预扫描即拒止）——重复行根本不写入输出文件，旧去重工具（Go 引擎 XML 行级手术）「阶段2 残留删不净」类问题结构上不存在，且源文件的单元格样式、条件格式（D 列重复值标红的「去重标准」）、列宽、超链接、自动筛选、工作表保护等全部原样保留（未勾选 sheet 与 styles/sharedStrings/theme 等条目字节级不变）；行号对齐经实测锁定：python-calamine 产出「第 1 行 ~ 最后一个含值行」的全部行号（按 r 属性对齐、缺失行号补空值行、尾部纯样式行截断），故删除集行号即 r 属性值，每 sheet 预扫描校验「最后含值行号 == calamine 行数」不一致立即作废、绝不带错删行；输出永不覆盖任何已有文件：`_resolve_output_paths` 在目标 xlsx 或重复清单 CSV 已存在（或与源文件同名，即对已去重文件再去重）时整体加时间戳（xlsx 与 CSV 配对同一时间戳，同秒冲突再加 `_2` 计数），源文件名已带 `_已去重` 后缀或旧时间戳先归一再重建、不叠加后缀——实际写入路径必然不同于源文件，无原位替换场景（旧的 `.tmp` + `os.replace` 逻辑已随之删除）；中途取消作废整个输出文件（半去重文件比没有文件更危险），取消前耗时白费但结果零歧义；取消信号为单一公开异常贯穿手术引擎的预扫描/条目/行三层检查点，杜绝「某一阶段漏接取消信号被误报为失败」
-18. **错误发现内建于导入、独立验证退出例行流程**：导入器逐批做 NOT NULL / 日期预检，坏行在导入时即被完整收集（整 sheet 扫描完才判失败），错误发现与导入天然一次完成；「验证数据」功能保留为可选离线检查（不写库、排查用），但每周例行流程不再包含独立验证步骤，避免同一套约束检查两遍
-19. **结构化错误 + 名单同源**：行级错误收集为结构化 dict（`row`/`message`/`kind`/`fields`/`values`），导入日志文本（`_format_sheet_errors` 分组区间+样例）与错误名单 xlsx（`error_list.generate_error_list`：负责人汇总 + 行级明细）从同一份数据生成；名单在源文件同目录自动落盘、带时间戳永不覆盖，业务侧可直接筛选
-20. **失败表按表名记忆、跨文件一键补录**：失败状态持久化到 `sheet_names.last_import_status`（'success'/'failed'，NULL 表示未尝试），不依赖文件名——定稿文件每周改名也能对上；主窗口概览给失败 Sheet 红标+tooltip，加载新文件时检测交集并弹「只勾选失败 Sheet」提示，补录成功后状态翻正、红标消除（解决失败表在库内长期隐性过期无人察觉的问题）
+1. **扁平模块，`importer.py` 只做编排**：UI 只负责展示与交互，导入 / 去重 / 验证各自独立成模块；面向内部少量用户，不引入 MVC / MVVM 框架。
+2. **逐表独立事务 + 失败继续 + 连接探活**：每表 `BEGIN → DELETE → INSERT → COMMIT`；表级 / 数据错误仅回滚该表并继续，`SELECT 1` 探活失败才中止全程；清空统一用 DELETE，兼容无 TRUNCATE 权限。
+3. **本地 SQLite 是唯一配置源**：`db_connections`（多连接 + 上次使用）、`sheet_names`（映射 + 导入时间 + 失败状态）、`column_mapping`、`dedup_settings`；首次启动自动建表、迁移新增列并从 `sheet_names.txt` 播种。
+4. **错误发现内建于导入，独立验证只作可选排查**：导入逐批做 NOT NULL / 日期 / 长度预检，坏行在整个 Sheet 扫描完后判失败；结构化错误同时生成日志文本与错误名单，保证「同一份数据、两种展示」。
+5. **失败表按表名记忆、跨文件补录**：失败状态写入 `last_import_status`（`success` / `failed`，NULL 表示未尝试），与文件名无关；主窗口红标 + 加载新文件时一键只勾失败 Sheet，补录成功后状态翻正。
+6. **去重用 XML 手术而非重写工作簿**：输出 = 源 zip 逐条目复制，仅重写勾选 Sheet 的 worksheet XML（删行、行号紧凑、dimension / autoFilter / 合并单元格 / 数据验证 / 超链接修正）；未勾选 Sheet 字节级搬运，样式与条件格式原样保留；预扫描校验行号对齐、拒止共享公式，输出永不覆盖、取消作废整个文件。
+7. **pyodbc 线程安全与超时**：工作线程内独立建连，每批独立 cursor；登录超时 10s、查询超时 300s，避免目标表被他人锁住时 DELETE / INSERT 永久阻塞。
+8. **错误集中与统一话术**：`ERROR_CONTACT` 集中联系信息，`error_msgs.humanize_db_error` 翻译底层报错；全局 `sys.excepthook` 兜底，工作线程异常只落日志不弹窗（QMessageBox 不可跨线程）。
+9. **UI 一致性与防误操作**：统一 `theme.py` QSS + `toast.py` 非阻塞提示；模态任务运行中拦截关闭（运行中的 QThread 被析构会崩溃）；导入前拦截「Sheet 无映射」「多 Sheet 映射同一表」；系统托盘支持最小化与彻底退出。
+10. **性能取舍**：整个任务只打开 workbook 一次；Sheet 名与 XML 条目用 zipfile；列映射与长度约束模块级缓存；表存在性检查与导入后 `COUNT(*)` 合并为单次批量 SQL，减少网络往返。
 
 ---
 
@@ -204,7 +223,7 @@ sifang/
 
 ### 数据源结构
 
-所有 46 个 sheet 共 11 列，部分 sheet 第 2 列名为 `小组` 而非 `负责人`，Sheet 046 多出第 12 列 `匹配类型`。
+所有 46 个 Sheet 共 11 列，部分 Sheet 第 2 列名为 `小组` 而非 `负责人`，Sheet 046 多出第 12 列 `匹配类型`。
 
 | # | 列名 |
 |---|---|
@@ -224,50 +243,53 @@ sifang/
 
 ### 使用流程
 
-1. **配置数据库连接**：启动程序后弹出连接对话框，填写服务器地址、数据库名、Schema（默认 dbo）、用户名、密码，点击「测试连接」，连接成功后方可进入主窗口（自动填充上次配置）
-2. **选择 Excel 文件**：在主窗口选择 `.xlsx` 文件（如 `信息源8.8_已去重.xlsx`），程序后台线程秒级读取全部 sheet（不阻塞界面），概览中显示每个 sheet 的序号、名称及最后导入时间
-3. **勾选要处理的 sheet**：默认全选，可通过「全选」复选框或逐行勾选调整范围
-4. **去重（可选，每周例行）**：点击「开始去重」→ 在去重设置中选择模式（默认全局去重，每周例行推荐）与判重列（默认 D 企业名称）→ 确认后执行；输出「原名_已去重.xlsx」为源文件的全格式保真副本（样式、条件格式、超链接等原样保留；未勾选的 Sheet 原样复制；目标已存在自动加时间戳、永不覆盖）与「重复清单__原名_已去重.csv」对照清单，成功后主窗口自动切换到去重后文件
-5. **导入（失败自动跳过）**：
-   - 点击「开始导入」：先在确认对话框中核对 sheet→表名映射，确认后执行导入
-   - 某张表导入失败不中断：该表自动回滚、跳过，继续导入后续表；结束汇总「成功 X / 失败 Y」
-   - 有失败表时自动在源文件同目录生成「源文件名__导入错误名单_时间戳.xlsx」：汇总页按负责人统计（可直接复制进群催办），明细页含 Sheet、Excel 行号、列名、当前值、问题描述
-6. **修正与补录**：把错误名单发业务人员修正；修正后重新选择定稿文件，程序自动提示「只勾选上次失败的 Sheet」，确认后「开始导入」一键补录（失败的 Sheet 在概览中标红，补录成功后消除）
-7. **查看结果**：导入完成后展示各表实际行数（数据库批量 `SELECT COUNT(*)`）与成功/失败汇总；每表成功后自动更新「最后导入时间」
+1. **连接数据库**：启动后自动尝试上次使用的连接；失败则打开「数据库连接管理」，左侧点选已保存连接即回填表单，可新增 / 删除；右侧填写连接名称、服务器、数据库、Schema（默认 dbo）、用户名、密码，「测试连接」成功后点「连接」进入主窗口
+2. **选择 Excel 文件**：点击「选择文件」，后台线程秒级读取全部 Sheet，概览显示序号、名称及最后导入时间
+3. **勾选要处理的 Sheet**：默认全选；可逐行勾选，或先点起始行再按住 Shift 点击结束行批量勾选；底部「全选」一键全选 / 取消
+4. **去重（可选，每周例行）**：点击「开始去重」→ 选择模式（默认全局去重）与判重列（默认 D 企业名称）→ 确认后执行；输出「原名_已去重.xlsx」与「重复清单__原名_已去重.csv」，成功后主窗口自动切换到去重后文件
+5. **导入（失败自动跳过）**：点击「开始导入」→ 在确认对话框核对 Sheet→表名映射 → 逐表执行「清空目标表 → 批量插入 → 提交」；某表失败自动回滚并跳过，结束汇总「成功 X / 失败 Y」并展示数据库实际行数
+6. **处理错误名单**：有失败表时自动在源文件同目录生成「源文件名__导入错误名单_时间戳.xlsx」，点「打开错误名单」查看；「汇总」页按负责人统计可直接复制进群催办，「明细」页可筛选定位
+7. **修正与补录**：把名单发业务人员修正；修正后重新选择定稿文件，程序自动提示「只勾选上次失败的 Sheet」，确认后「开始导入」一键补录，失败的 Sheet 红标随之消除
 
 ### 配置管理
 
 | 配置项 | 位置 | 说明 |
 |---|---|---|
-| 数据库连接 | 连接对话框 / SQLite `db_connections` | 含服务器、库名、Schema、用户名、密码，自动保存，启动时自动填充上次配置（`is_last_used` 标记） |
-| Sheet名-表映射 | 菜单「Sheet名-表映射」（`Ctrl+N`） | 展示全部 46 条映射（序号、Sheet名称、数据库表名、最后导入时间），支持搜索筛选、双击编辑、新增、右键删除 |
-| 列映射 | 菜单「列映射」 | 展示 Excel 列→数据库字段映射（序号、Excel列、数据库字段、Excel索引、说明、约束说明） |
-| 去重设置 | 去重设置弹窗 / SQLite `dedup_settings` | 去重模式（默认全局去重）与判重列（默认 D 企业名称），确认去重时自动保存，下次打开自动填充 |
+| 数据库连接 | 连接管理对话框 / SQLite `db_connections` | 可保存多条连接（连接名、服务器、库名、Schema、用户名、密码）；`is_last_used` 标记上次使用，启动时自动连接并自动填充 |
+| Sheet名-表映射 | 菜单「Sheet名-表映射」（`Ctrl+N`） | 展示全部映射（序号、Sheet名称、数据库表名、最后导入时间），支持搜索筛选、双击编辑、新增、右键删除、批量替换 |
+| 列映射 | 菜单「列映射」 | 只读展示 Excel 列→数据库字段映射（序号、Excel列、数据库字段、Excel索引、说明、约束说明） |
+| 去重设置 | 去重设置弹窗 / SQLite `dedup_settings` | 去重模式（默认全局去重）与判重列（默认 D 企业名称），确认去重时自动保存 |
+| 失败状态 | SQLite `sheet_names.last_import_status` | 按表名记录 `success` / `failed`，用于红标与一键补录 |
 
 ### 部署与打包
 
 - 使用 PyInstaller 打包为单个 .exe 文件，在 Windows 上直接运行（`pyinstaller build.spec`）
-- 本地 SQLite 数据库 `local.db` 与 exe 同目录，存储数据库连接信息（`db_connections` 表）、sheet 名称映射（`sheet_names` 表）、列映射（`column_mapping` 表）和去重设置（`dedup_settings` 表），首次启动自动建表并从 `sheet_names.txt` 播种
+- `build.spec` 将 `sheet_names.txt` 与 `assets/icon.png` 打进包内，exe 图标使用 `assets/icon.ico`，`console=False`
+- 本地 SQLite 数据库 `local.db` 与 exe 同目录，首次启动自动建表并播种
 - 最终用户无需安装 Python 或任何依赖
 - 远程数据库表结构由开发者提前在 SQL Server 中建好，工具本身不建表
-- 导入/去重日志输出到 exe 同目录的 `import_log.txt`（超 1MB 轮转为 `.bak`），便于追溯历史
+- 导入 / 去重日志输出到 exe 同目录的 `import_log.txt`（超 1MB 轮转为 `.bak`）
 
 ---
 
 ## 注意事项
 
-- **关窗行为**：主窗口点 ✕ 每次弹窗询问「直接退出（默认）/最小化到托盘/取消」（取消按钮、Esc、点弹窗 ✕ 均为取消关窗——QMessageBox 不显式 setEscapeButton(取消) 时 Esc/✕ 会误触默认按钮「直接退出」）；最小化到托盘后双击图标恢复，右键托盘「退出」彻底退出（任务运行中拒绝退出）；托盘不可用的环境直接退出不询问
+- **关窗行为**：托盘可用时点 ✕ 每次弹窗询问「直接退出（默认）/ 最小化到托盘 / 取消」（Esc、点弹窗 ✕ 均为取消关窗）；最小化后双击托盘图标恢复，右键「退出」彻底退出（任务运行中拒绝退出并气泡提示）；托盘不可用时直接退出不询问
 - **全量覆盖导入**：每次导入先清空目标表再插入全部数据，请确认勾选范围后再执行
 - **逐表独立事务且失败不中断**：某表导入失败仅该表回滚，其余表照常导入并记录 `last_import_time`；连接中断等严重错误才中止整个流程（中止前已成功的表保留）
-- **失败表记忆与一键补录**：失败状态按表名持久化（`sheet_names.last_import_status`），主窗口红标提示；加载新文件时自动提示只勾选失败 Sheet 补录，跨文件名有效
-- **错误名单**：有失败表时自动生成于源文件同目录（带时间戳、永不覆盖），汇总页按负责人统计可直接复制进群催办，明细页可筛选；「打开错误名单」按钮一键打开
+- **失败表记忆与一键补录**：失败状态按表名持久化，主窗口红标提示；加载新文件时自动提示只勾选失败 Sheet 补录，跨文件名有效
+- **错误名单**：有失败表时自动生成于源文件同目录（带时间戳、永不覆盖）；「汇总」页按负责人统计，「明细」页可筛选；「打开错误名单」按钮一键打开
 - **清空方式为 DELETE**：目标表使用 `DELETE FROM` 清空（而非 TRUNCATE），兼容无 TRUNCATE 权限的账号
-- **表缺失检查**：导入前检查选中表是否全部存在，任一缺失则终止导入并弹窗提示
-- **Schema 支持**：连接对话框可指定 Schema（默认 dbo），所有表名查询均带 schema 前缀
-- **日期格式兼容**：Excel 日期可能被 python-calamine 读为 `datetime.datetime`（含时间部分）或字符串（如 `'2026-02-02 00:00:00'`、`'2026/2/2 0:00'`、`'2026/7/4 13.29'`、`'2026/4/20/09:50'`、`'2026/5/27/11：27'`），程序通过 `date_utils` 统一归一化（`/`→`-`、`.`→`:`、全角冒号→半角）后按 5 种格式解析为纯 `datetime.date`，避免 SQL Server「日期时间字段溢出」错误
-- **可空列空值处理**：nullable nvarchar 列的 `None` 自动转为空字符串 `""`，避免 pyodbc `fast_executemany` 因类型推断过窄导致 "String data, right truncation" 错误
-- **行号追踪**：Excel 空行会被跳过，报错诊断时以实际行号（而非物理行号）定位 Sheet、Excel 行号、列名及单元格值；同类错误按数据库报错分组展示
+- **表缺失检查**：导入前仅检查本次勾选的表是否全部存在，任一缺失则终止并提示执行 `create_all_tables.sql`
+- **映射冲突检查**：Sheet 无本地映射、或多个 Sheet 映射到同一张表时，导入 / 验证前直接拦截并提示修正
+- **Schema 支持**：连接管理可指定 Schema（默认 dbo），所有 SQL 均带 schema 前缀
+- **日期格式兼容**：Excel 日期可能被 python-calamine 读为 `datetime.datetime` 或字符串（如 `'2026-02-02 00:00:00'`、`'2026/2/2 0:00'`、`'2026/7/4 13.29'`、`'2026/4/20/09:50'`、`'2026/5/27/11：27'`），`date_utils` 统一归一化后按 5 种格式解析为纯 `datetime.date`，避免 SQL Server「日期时间字段溢出」
+- **数值格式日期会被拦截**：Excel「常规」单元格把日期读成序列号（int/float）时，导入预检直接报错并提示「日期列应为文本格式」
+- **可空列空值处理**：nullable nvarchar 列的 `None` 自动转为空字符串 `""`，避免 `fast_executemany` 类型推断过窄导致 "String data, right truncation"
+- **行号追踪**：Excel 空行会被跳过，诊断时以实际 Excel 行号定位 Sheet、行号、列名及单元格值；同类错误按报错分组展示，连续行号折叠为区间
+- **查询超时**：`connect()` 登录超时 10s，连接后查询超时 300s；目标表被他人长时间锁住时会报超时而非无限等待
 - **错误处理**：所有错误统一弹窗提示，附带联系信息（`ERROR_CONTACT`）；「使用说明」菜单中亦可查看使用流程与联系人
-- **验证功能定位**：「验证数据」保留为可选的离线检查（NOT NULL、字段长度、日期格式，不写库），用于导入前抽查或排查疑难；每周例行流程直接导入——导入器内置 NOT NULL/日期预检，坏行在导入时即被完整收集并汇总，无需预先单独验证
-- **数据去重**：判重键 = 判重列值去首尾空白并全角转半角；判重键为空或录入时间不可解析的行不参与判重、原样保留（空键行导入时由 NOT NULL 预检报错）；同一判重键保留录入时间最早者（平手保留首次出现），整行删除其余重复行（含 Sheet 046 第 12 列在内的全列保真）；输出为源文件的全格式保真副本（XML 手术：单元格样式、条件格式、列宽、超链接、自动筛选、保护等原样保留，仅删行+行号重排；合并单元格与数据验证区域随行号平移修正，范围内含被删行的合并单元格剔除；含共享公式（下拉填充）的 Sheet 预扫描即拒止，避免输出文件被 Excel 判定损坏），未勾选的 Sheet 字节级原样搬运；输出永不覆盖任何已有文件（目标已存在自动加时间戳，对已去重文件再去重也生成新时间戳副本、不原位更新）；重复清单 `重复清单__原名….csv` 为长表对照（处理/Sheet名称/Excel行号/判重列原始值/录入时间，保留行与其全部删除行相邻，各自显示自己的原始值，全角/半角差异可见）；判重列选 L 匹配类型时，无第 12 列的 sheet 键全为空、自然退化为仅复制，属预期行为
+- **验证功能定位**：「验证数据」为可选离线检查（NOT NULL、字段长度、日期格式，不写库），用于导入前抽查或排查疑难；每周例行流程直接导入，导入器内置预检会完整收集坏行
+- **数据去重**：判重键 = 判重列值去首尾空白并全角转半角；判重键为空或录入时间不可解析的行不参与判重、原样保留；同一判重键保留录入时间最早者（平手保留首次出现），整行删除其余重复行（含 Sheet 046 第 12 列在内的全列保真）；输出为全格式保真副本（XML 手术：样式、条件格式、列宽、超链接、自动筛选、保护原样保留，仅删行 + 行号重排；合并单元格与数据验证区域随行号平移修正，范围内含被删行的合并单元格剔除；含共享公式的 Sheet 预扫描即拒止），未勾选的 Sheet 字节级原样搬运；输出永不覆盖任何已有文件（目标已存在自动加时间戳，对已去重文件再去重也生成新副本）；重复清单 CSV 为长表对照（处理/Sheet名称/Excel行号/判重列原始值/录入时间，保留行与其全部删除行相邻）；判重列选 L 匹配类型时，无第 12 列的 Sheet 键全为空、自然退化为仅复制，属预期行为
 - **去重取消**：中途取消则作废整个输出文件（不产出半去重文件），且不自动切换文件；输出文件被 Excel 占用时提示关闭后重试
+- **多实例**：`local.db` 与日志均按「与 exe 同目录」定位；日志写入加文件锁，连接配置以 `is_last_used` 标记，双开实例时主窗口使用本次会话的连接参数快照建连，不受另一实例改写影响
